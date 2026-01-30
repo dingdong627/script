@@ -1,0 +1,327 @@
+// ==UserScript==
+// @name         Better portfolio
+// @namespace    http://tampermonkey.net/
+// @version      3.2
+// @description  Replace rugplay.com potfolio list with a better one
+// @match        https://rugplay.com/portfolio*
+// @match        https://*.rugplay.com/portfolio*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Clusterize.js CDN
+    const CLUSTERIZE_JS = "https://cdn.jsdelivr.net/npm/clusterize.js@1.0.0/clusterize.min.js";
+    const PORTFOLIO_API_PATH = '/api/portfolio';
+    const TRUNCATED_COUNT = 0;
+    let fullPortfolio = null;
+
+    function coinValueCalcWithoutK(price, quantity) {
+        const k = 1000000000000;
+        const C = Math.sqrt(k / price);
+        const B = k / C;
+        const value = B - (k / (C + quantity));
+        return value;
+    }
+
+    // ---- 1. Load Clusterize.js if not present ----
+    function injectClusterize(callback) {
+        if (window.Clusterize) return callback();
+        let s = document.createElement('script');
+        s.src = CLUSTERIZE_JS;
+        s.onload = callback;
+        document.head.appendChild(s);
+    }
+
+    // ---- 2. Intercept API, store coinHoldings, pass empty to UI, recalc values ----
+    const origFetch = window.fetch;
+    window.fetch = async function(input, init) {
+        let url = (typeof input === "string") ? input : input.url;
+        if (url.includes(PORTFOLIO_API_PATH)) {
+            const resp = await origFetch.apply(this, arguments);
+            const clone = resp.clone();
+            let data = await clone.json();
+            if (Array.isArray(data.coinHoldings)) {
+                // Patch here: recalculate value and percentageChange and totalCoinValue
+                const patchedHoldings = data.coinHoldings.map(row => {
+                    const value = coinValueCalcWithoutK(Number(row.currentPrice), Number(row.quantity));
+                    const costBasis = Number(row.costBasis);
+                    const percentageChange = (costBasis === 0) ? "" : (value - costBasis) / costBasis * 100;
+                    return {
+                        ...row,
+                        value,
+                        percentageChange
+                    };
+                });
+
+                // Recalculate totalCoinValue
+                const totalCoinValue = patchedHoldings.reduce((sum, row) => sum + (row.value || 0), 0);
+                const totalValue = totalCoinValue + data.baseCurrencyBalance
+
+                // Save patched fullPortfolio
+                fullPortfolio = {
+                    ...data,
+                    coinHoldings: patchedHoldings,
+                    totalCoinValue: totalCoinValue,
+                    totalValue: totalValue
+                };
+
+                let truncated = {...fullPortfolio};
+                truncated.coinHoldings = patchedHoldings.slice(0, TRUNCATED_COUNT);
+
+                return new Response(JSON.stringify(truncated), {
+                    status: resp.status,
+                    statusText: resp.statusText,
+                    headers: resp.headers
+                });
+            }
+            return resp;
+        } else {
+            return origFetch.apply(this, arguments);
+        }
+    };
+
+    // ---- 3. Helper: camelCase → Label ----
+    function labelCase(str) {
+        if (!str) return "";
+        return str.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, s => s.toUpperCase());
+    }
+    // ---- 4. Format numbers smartly ----
+    function formatNumberSmart(val) {
+        if (val == null || val === "") return "";
+        let n = Number(val);
+        if (isNaN(n)) return val;
+        const absN = Math.abs(n);
+        if (absN >= 1e9) return (n / 1e9).toFixed(5).replace(/\.?0+$/, '') + "B";
+        if (absN >= 1e6) return (n / 1e6).toFixed(5).replace(/\.?0+$/, '') + "M";
+        if (absN >= 1e3) return (n / 1e3).toFixed(5).replace(/\.?0+$/, '') + "K";
+        if (absN >= 1) return n.toFixed(5).replace(/\.?0+$/, '');
+        if (absN >= 1e-3) return (n * 1e3).toFixed(5).replace(/\.?0+$/, '') + "m";
+        if (absN >= 1e-6) return (n * 1e6).toFixed(5).replace(/\.?0+$/, '') + "µ";
+        if (absN >= 1e-9) return (n * 1e9).toFixed(5).replace(/\.?0+$/, '') + "n";
+        if (absN >= 1e-12) return (n * 1e12).toFixed(5).replace(/\.?0+$/, '') + "p";
+        if (absN === 0) return 0;
+        return n.toExponential(5);
+    }
+    function isRenderableNumber(val) {
+        return !isNaN(val) && (typeof val === "number" || /^\s*-?\d+(\.\d+)?\s*$/.test(val));
+    }
+    // ---- 5. Build table, search/sort, render ----
+    function buildPortfolioTable(coinHoldings) {
+        if (!Array.isArray(coinHoldings)) return null;
+        let cols = [];
+        const keyFreq = {};
+        for(const row of coinHoldings) for(const k in row) keyFreq[k] = (keyFreq[k]||0) + 1;
+        cols = Object.keys(keyFreq).sort((a,b) => keyFreq[b]-keyFreq[a]);
+        cols = cols.filter(col => col !== "icon").filter(col => col !== "avgPurchasePrice");
+        ['symbol','value'].reverse().forEach(key => { let i = cols.indexOf(key); if(i>=0){ cols.splice(i,1); cols.unshift(key);} });
+        const colDefs = [];
+        while (colDefs.length < cols.length) colDefs.push({class:"w-[12%] min-w-[70px]", label:labelCase(cols[colDefs.length])});
+        const unique = `rpvt_${Math.random().toString(36).slice(2,10)}_${Date.now()}`;
+        const scrollId = `scrollArea_${unique}`;
+        const contentId = `contentArea_${unique}`;
+
+        const container = document.createElement("div");
+        container.className = "bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm mt-8";
+        container.setAttribute("data-slot", "card");
+        container.innerHTML = `
+        <div data-slot="card-header" class="grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6">
+          <div class="flex items-center justify-between flex-wrap">
+            <div>
+              <div data-slot="card-title" class="font-semibold leading-none flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide-icon lucide lucide-pie-chart h-5 w-5"><path d="M21.21 15.89A10 10 0 1 1 12 2" /><path d="M22 12A10 10 0 0 0 12 2v10z" /></svg>
+                Portfolio
+              </div>
+              <p data-slot="card-description" class="text-muted-foreground text-sm">Your tokens, sorted and searchable</p>
+            </div>
+            <div class="search-bar flex items-center ml-auto mt-2 md:mt-0" style="min-width:210px;">
+              <input type="text" id="customSearchInput" class="input input-search border rounded-md px-3 py-1 mr-2 text-sm" placeholder="Search table..." autocomplete="off" style="min-width:130px;">
+              <span class="count text-muted-foreground text-xs" id="searchCount"></span>
+            </div>
+          </div>
+        </div>
+        <div data-slot="card-content" class="px-6">
+          <div data-slot="table-container" class="relative w-full overflow-x-auto">
+            <table data-slot="table" class="w-full caption-bottom text-sm" style="table-layout:fixed; min-width:600px;">
+              <colgroup>
+                ${colDefs.map(def => `<col class="${def.class}">`).join('')}
+              </colgroup>
+              <thead data-slot="table-header" class="[&>tr]:border-b">
+                <tr data-slot="table-row" class="hover:bg-muted/50 data-[state=selected]:bg-muted border-b transition-colors">
+                  ${cols.map((col,i) => `<th data-slot="table-head"
+                    class="text-foreground h-10 whitespace-nowrap px-2 text-left align-middle font-medium cursor-pointer select-none ${colDefs[i].class}"
+                    style="user-select:none;"
+                    data-col="${col}"
+                    >${labelCase(col)}</th>`).join('')}
+                </tr>
+              </thead>
+            </table>
+            <div id="${scrollId}" style="max-height:660px; overflow-y:auto;">
+              <table class="w-full caption-bottom text-sm" style="table-layout:fixed;">
+                <colgroup>
+                  ${colDefs.map(def => `<col class="${def.class}">`).join('')}
+                </colgroup>
+                <tbody id="${contentId}" data-slot="table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        `;
+
+        let dataSet = [...coinHoldings];
+        let filteredDataSet = [...coinHoldings];
+        let sortCol = "value", sortDir = "desc";
+        let lastSearch = "";
+        let clusterize = null;
+        function renderRows() {
+            return filteredDataSet.map(row => {
+                const symbol = row[cols[0]];
+                const safeSymbol = String(symbol || '').replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                return `<tr data-slot="table-row" class="data-[state=selected]:bg-muted border-b hover:bg-muted/50 cursor-pointer transition-colors" style="cursor:pointer"
+                    onclick="window.open('https://rugplay.com/coin/${encodeURIComponent(safeSymbol)}', '_self')">` +
+                    cols.map((col,i) =>
+                      `<td data-slot="table-cell" class="whitespace-nowrap p-2 align-middle font-medium text-xs ${isRenderableNumber(row[col]) ? "font-mono" : ""} ${colDefs[i].class}" title="${row[col] ?? ''}">` +
+                        (
+                          isRenderableNumber(row[col]) && Math.abs(Number(row[col])) >= 1000
+                            ? formatNumberSmart(row[col])
+                            : (isRenderableNumber(row[col]) ? formatNumberSmart(row[col]) : (row[col] ?? ''))
+                        ) +
+                      `</td>`
+                    ).join('') +
+                    '</tr>';
+            });
+        }
+        function compareValues(a,b) {
+            if(a==null && b==null) return 0;
+            if(a==null) return -1;
+            if(b==null) return 1;
+            let numA = parseFloat(a), numB = parseFloat(b);
+            let isNumA = !isNaN(numA) && a !== '';
+            let isNumB = !isNaN(numB) && b !== '';
+            if (isNumA && isNumB) return numA - numB;
+            return String(a).localeCompare(String(b), undefined, { sensitivity: 'base' });
+        }
+        function sortData(col, options={toggle:true}) {
+            if(sortCol === col) {
+                if(options.toggle) sortDir = sortDir==="asc"?"desc":"asc";
+            } else { sortCol = col; sortDir = "asc"; }
+            filteredDataSet.sort((a, b) => {
+                const cmp = compareValues(a[sortCol], b[sortCol]);
+                return sortDir==="asc"?cmp:-cmp;
+            });
+        }
+        function updateTableAndHeader() {
+            clusterize.update(renderRows());
+            container.querySelectorAll('th[data-slot="table-head"]').forEach(th => {
+                th.classList.remove('sorted-asc', 'sorted-desc');
+                if (th.dataset.col === sortCol) th.classList.add(sortDir === "asc" ? 'sorted-asc' : 'sorted-desc');
+            });
+        }
+        function filterDataSet(query) {
+            if (!query) filteredDataSet = [...dataSet];
+            else {
+                const q = query.trim().toLowerCase();
+                filteredDataSet = dataSet.filter(row => cols.some(col => ((row[col] ?? '') + '').toLowerCase().includes(q)));
+            }
+            if (sortCol) sortData(sortCol, {toggle: false});
+            updateTableAndHeader();
+            updateSearchCount();
+        }
+        function updateSearchCount() {
+            const input = container.querySelector('#customSearchInput');
+            const countSpan = container.querySelector('#searchCount');
+            if (!input || !countSpan) return;
+            const v = input.value.trim();
+            if (!v) countSpan.textContent = "";
+            else countSpan.textContent = filteredDataSet.length + " found";
+        }
+        function showCustomSearchBar() {
+            const input = container.querySelector('#customSearchInput');
+            if (!input) return;
+            setTimeout(() => { input.focus(); input.select(); }, 0);
+            input.value = lastSearch;
+            filterDataSet(lastSearch);
+        }
+        container.querySelectorAll('th[data-slot="table-head"]').forEach(th => {
+            th.addEventListener('click', () => {
+              sortData(th.dataset.col, {toggle:true});
+              updateTableAndHeader();
+            });
+        });
+        container.querySelector('#customSearchInput').addEventListener('input', function(e) {
+            lastSearch = e.target.value;
+            filterDataSet(e.target.value);
+        });
+        container.querySelector('#customSearchInput').addEventListener('keydown', function(e) {
+            if (e.key === "Escape") {
+                lastSearch = "";
+                this.value = "";
+                filterDataSet("");
+            }
+        });
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='f') {
+                e.preventDefault();
+                showCustomSearchBar();
+            }
+        });
+        setTimeout(function(){
+            clusterize = new window.Clusterize({
+                rows: renderRows(),
+                scrollId: scrollId,
+                contentId: contentId
+            });
+            sortData(sortCol, {toggle:false});
+            updateTableAndHeader();
+        }, 0);
+
+        const style = document.createElement('style');
+        style.textContent = `
+          .rugplay-hijack-table th.sorted-asc:after { content: " ▲"; font-size: 0.90em; vertical-align:middle; color: #7e8693;}
+          .rugplay-hijack-table th.sorted-desc:after { content: " ▼"; font-size: 0.90em; vertical-align:middle; color: #7e8693;}
+          .rugplay-hijack-table td, .rugplay-hijack-table th {background:inherit!important;}
+          .rugplay-hijack-table input.input-search {background:var(--background); color:inherit;}
+          .count {margin-left:0.5em;}
+        `;
+        container.appendChild(style);
+
+        container.classList.add('rugplay-hijack-table');
+        return container;
+    }
+
+    // ---- 6. Find "No coin holdings" card & replace it ----
+    function replaceNoHoldingsDivWithTable() {
+        if (!fullPortfolio || !Array.isArray(fullPortfolio.coinHoldings) || !fullPortfolio.coinHoldings.length) return false;
+        const h3s = Array.from(document.querySelectorAll('h3'));
+        for (const h3 of h3s) {
+            if (h3.textContent && h3.textContent.trim() === 'No coin holdings') {
+                let cardDiv = h3;
+                while (cardDiv && !(cardDiv.dataset && cardDiv.dataset.slot === 'card')) {
+                    cardDiv = cardDiv.parentElement;
+                }
+                if (cardDiv) {
+                    const newTable = buildPortfolioTable(fullPortfolio.coinHoldings);
+                    cardDiv.replaceWith(newTable);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // ---- 7. Try every 500ms up to 8s to replace card ----
+    function keepTryingToReplace() {
+        let tryCount = 0;
+        const timer = setInterval(() => {
+            tryCount++;
+            if (replaceNoHoldingsDivWithTable() || tryCount > 16) {
+                clearInterval(timer);
+            }
+        }, 500);
+    }
+
+    // ---- 8. On Clusterize loaded, loop to replace ----
+    injectClusterize(keepTryingToReplace);
+
+})();
