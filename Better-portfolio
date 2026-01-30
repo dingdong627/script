@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    http://tampermonkey.net/
-// @version      3.2.1
+// @version      3.2.2
 // @description  Replace rugplay.com potfolio list with a better one
 // @match        https://rugplay.com/portfolio*
 // @match        https://*.rugplay.com/portfolio*
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
 // ==/UserScript==
 
 (function() {
