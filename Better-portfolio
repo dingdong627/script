@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    http://tampermonkey.net/
-// @version      3.6.0
+// @version      3.6.1
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
 // @match        https://rugplay.com/*
 // @match        https://*.rugplay.com/*
@@ -35,7 +35,7 @@
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
       const url = typeof input === 'string' ? input : input.url;
-      if (url.includes(PORTFOLIO_API_PATH)) {
+      if (url.includes(PORTFOLIO_API_PATH) && isPortfolioPage()) {
         const resp = await origFetch.apply(this, arguments);
         const clone = resp.clone();
         const data = await clone.json();
