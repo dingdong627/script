@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better portfolio
-// @namespace    http://tampermonkey.net/
-// @version      3.5.0
+// @namespace    Violentmonkey Scripts
+// @version      3.5.1
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
 // @match        https://rugplay.com/portfolio*
 // @match        https://*.rugplay.com/portfolio*
@@ -307,16 +307,29 @@
         showCustomSearchBar();
       }
     });
-
-    setTimeout(() => {
-      clusterize = new window.Clusterize({
-        rows: renderRows(),
-        scrollId,
-        contentId,
-      });
-      sortData(sortCol, { toggle: false });
-      updateTableAndHeader();
-    }, 0);
+    function waitForScrollElementsAndInitClusterize() {
+  const scrollEl = document.getElementById(scrollId);
+  const contentEl = document.getElementById(contentId);
+  if (scrollEl && contentEl) {
+    clusterize = new window.Clusterize({
+      rows: renderRows(),
+      scrollId,
+      contentId,
+    });
+    sortData(sortCol, { toggle: false });
+    updateTableAndHeader();
+  } else {
+    // Try again once shortly later (max 20 tries)
+    if (!waitForScrollElementsAndInitClusterize.tries) waitForScrollElementsAndInitClusterize.tries = 1;
+    else waitForScrollElementsAndInitClusterize.tries++;
+    if (waitForScrollElementsAndInitClusterize.tries < 20) {
+      setTimeout(waitForScrollElementsAndInitClusterize, 50);
+    } else {
+      console.error("Failed to initialize Clusterize: scroll/content elements not found.");
+    }
+  }
+}
+waitForScrollElementsAndInitClusterize();
 
     // Extra styles
     const style = document.createElement('style');
@@ -968,4 +981,44 @@ function createSendMoneyModal(portfolio) {
     }
   });
 }
+  // ... [rest of your script above stays the same] ...
+
+// --- SPA NAVIGATION FIX ---
+
+/**
+ * Calls keepTryingToInjectTable if the URL matches a portfolio page
+ */
+function checkAndInjectPortfolio() {
+  if (/^https:\/\/(?:[^\/]+\.)?rugplay\.com\/portfolio\b/.test(location.href)) {
+    keepTryingToInjectTable();
+  }
+}
+
+// Override pushState and replaceState to trigger on SPA navs
+(function () {
+  const origPushState = history.pushState;
+  const origReplaceState = history.replaceState;
+
+  function fireLocationChangeEvent() {
+    window.dispatchEvent(new Event('locationchange'));
+  }
+
+  history.pushState = function () {
+    origPushState.apply(this, arguments);
+    fireLocationChangeEvent();
+  };
+  history.replaceState = function () {
+    origReplaceState.apply(this, arguments);
+    fireLocationChangeEvent();
+  };
+
+  window.addEventListener('popstate', fireLocationChangeEvent);
+})();
+
+// Listen for custom locationchange events
+window.addEventListener('locationchange', checkAndInjectPortfolio);
+
+// Optionally, also observe DOM, or fallback to polling for robustness
+// Call on initial load as well
+checkAndInjectPortfolio();
 })();
