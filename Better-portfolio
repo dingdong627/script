@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    http://tampermonkey.net/
-// @version      3.5.2
+// @version      3.6.0
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
 // @match        https://rugplay.com/*
 // @match        https://*.rugplay.com/*
@@ -12,22 +12,16 @@
 
 (function () {
   'use strict';
-
+    // Config
+    const CLUSTERIZE_JS = 'https://cdn.jsdelivr.net/npm/clusterize.js@1.0.0/clusterize.min.js';
+    const PORTFOLIO_API_PATH = '/api/portfolio';
+    const TRUNCATED_COUNT = 0;
   // --- URL logic ---
   function isPortfolioPage() {
     return location.hostname.endsWith("rugplay.com") &&
       location.pathname === "/portfolio";
   }
-
-  // --- MAIN SCRIPT: Only runs on /portfolio ---
-  function runPortfolioScript() {
-    // Config
-    const CLUSTERIZE_JS = 'https://cdn.jsdelivr.net/npm/clusterize.js@1.0.0/clusterize.min.js';
-    const PORTFOLIO_API_PATH = '/api/portfolio';
-    const TRUNCATED_COUNT = 0;
-    window.fullPortfolio = null;
-
-    // --- UTILITIES ---
+      // --- UTILITIES ---
     const coinValueCalcWithoutK = (price, quantity) => {
       const k = 1_000_000_000_000;
       const C = Math.sqrt(k / price);
@@ -35,15 +29,9 @@
       return B - k / (C + quantity);
     };
 
-    const injectClusterize = (callback) => {
-      if (window.Clusterize) return callback();
-      const s = document.createElement('script');
-      s.src = CLUSTERIZE_JS;
-      s.onload = callback;
-      document.head.appendChild(s);
-    };
-
-    // --- OVERRIDE FETCH FOR PORTFOLIO API PATCH ---
+  if (!window.__portfolioFetchOverridden) {
+      window.__portfolioFetchOverridden = true;
+        // --- OVERRIDE FETCH FOR PORTFOLIO API PATCH ---
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
       const url = typeof input === 'string' ? input : input.url;
@@ -77,6 +65,22 @@
       }
       return origFetch.apply(this, arguments);
     };
+  }
+
+  // --- MAIN SCRIPT: Only runs on /portfolio ---
+  function runPortfolioScript() {
+    window.fullPortfolio = null;
+
+
+
+    const injectClusterize = (callback) => {
+      if (window.Clusterize) return callback();
+      const s = document.createElement('script');
+      s.src = CLUSTERIZE_JS;
+      s.onload = callback;
+      document.head.appendChild(s);
+    };
+
 
     const labelCase = (str) =>
       str
@@ -535,467 +539,588 @@
 
     injectClusterize(keepTryingToInjectTable);
 
-    function createSendMoneyModal(portfolio) {
-      document.getElementById('rp-sendmoney-modal')?.remove();
+function createSendMoneyModal(portfolio) {
+  document.getElementById('rp-sendmoney-modal')?.remove();
 
-      const modal = document.createElement('div');
-      modal.id = 'rp-sendmoney-modal';
-      modal.style = `
-        position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:9999;
-      `;
+  const modal = document.createElement('div');
+  modal.id = 'rp-sendmoney-modal';
+  modal.style = `
+    position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:9999;
+  `;
 
-      const coinHoldings = portfolio.coinHoldings ?? [];
-      const userBalance = portfolio.baseCurrencyBalance ?? 0;
-      let selectedCoinSymbol = '';
+  const coinHoldings = portfolio.coinHoldings ?? [];
+  const userBalance = portfolio.baseCurrencyBalance ?? 0;
+  let selectedCoinSymbol = '';
 
-      // Helper: wait for Clusterize to be loaded if needed
-      function loadClusterizeIfNeeded(callback) {
-        if (window.Clusterize) return callback();
-        const script = document.createElement('script');
-        script.src = CLUSTERIZE_JS;
-        script.onload = () => callback();
-        document.head.appendChild(script);
-      }
+  // Toggle logic
+  let coinInputMode = 'amount'; // 'amount' or 'value'
 
-      // --- New Coin Block with fuzzy search and Clusterize.js ---
-      function getCoinItemHtml(h) {
-        return `<div class="rp-cluster-coin-item" tabindex="0" data-symbol="${h.symbol}" style="padding:5px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;">
-          <span style="flex:1;">${h.symbol}</span><span style="font-size:13px;color:#ccc;">(${h.quantity.toFixed(6)} available)</span>
-        </div>`;
-      }
-      const coinDisclaimerHtml = `
-        <div id="rp-sendmoney-coindisclaimer" style="color:#e69734;padding:3px 0 6px 0;font-size:13px;display:none;">
-          <b>Note:</b> The server currently uses an incorrect value calculation for coins.<br>
-          The value above is what the server uses, but the <b>true value</b> is shown below.
-        </div>
-      `;
-      // Modal UI with custom coin block
-      modal.innerHTML = `
-        <div style="
-          background: var(--background, #19191f);
-          color: var(--foreground, #eee);
-          min-width:350px;
-          max-width:95vw;
-          box-shadow:0 4px 32px rgba(0,0,0,.18);
-          border-radius:12px;
-          padding:32px 28px;
-          font-size:16px;
-          position:relative;">
-          <button id="rp-modal-close" style="position:absolute;top:11px;right:12px;font-size:20px;background:none;border:none;color:#888;cursor:pointer;">×</button>
-          <div style="margin-bottom:16px;font-weight:600;font-size:20px;display:flex;gap:10px;align-items:center;">
-            <svg style="height:22px;width:22px;vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M17 8V5a5 5 0 0 0-10 0v3"/><rect width="20" height="14" x="2" y="8" rx="2" /><path d="M12 12v4"/><path d="M8 16h8"/></svg>
-            Send Money / Coins
-          </div>
-          <form id="rp-sendmoney-form" autocomplete="off">
-            <div style="margin-bottom:12px;">
-              <label style="font-weight:500;">Recipient Username</label>
-              <input type="text" id="rp-sendmoney-recipient" autocomplete="off" placeholder="Enter username (without @)" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
-            </div>
-            <div style="margin-bottom:12px;">
-              <label style="font-weight:500;">Type</label>
-              <select id="rp-sendmoney-type" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
-                <option value="CASH">Cash ($)</option>
-                <option value="COIN" ${coinHoldings.length === 0 ? 'disabled' : ''}>Coins</option>
-              </select>
-            </div>
-            <div id="rp-sendmoney-coinblock" style="margin-bottom:12px;display:none;">
-              <label style="font-weight:500;">Select Coin</label>
-              <div id="rp-coin-search-wrap" style="position:relative;">
-                <input id="rp-sendmoney-coinsearch" autocomplete="off" placeholder="Search coin symbol..." style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
-                <div id="rp-sendmoney-coindrop" style="position:absolute;left:0;right:0;top:40px;z-index:20;background:#222;border-radius:7px;box-shadow:0 6px 32px rgba(0,0,0,0.16);display:none;max-height:192px;border:1px solid #2a2e38;">
-                  <div id="rp-clusterize-scroll" style="max-height:192px;overflow-y:auto;">
-                    <div id="rp-clusterize-content"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div style="margin-bottom:10px;">
-              <label id="rp-sendmoney-amtlabel" style="font-weight:500;">Amount ($)</label>
-              <div style="display:flex;gap:6px;">
-                <input type="number" id="rp-sendmoney-amount" min="0" autocomplete="off" step="0.01" placeholder="0.00" style="flex:1;padding:7px 8px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
-                <button type="button" id="rp-sendmoney-max" style="background:#3a4157;color:#fff;font-weight:500;padding:7px 12px;border-radius:5px;border:none;cursor:pointer;">Max</button>
-              </div>
-              <div style="margin:2px 0 0 2px;font-size:13px;color:#aaa;">
-                <span id="rp-sendmoney-available"></span>
-                <span id="rp-sendmoney-coinvalue" style="margin-left:10px;"></span>
-      <div id="rp-sendmoney-coindisclaimer-container">
-            ${coinDisclaimerHtml}
-            <div id="rp-sendmoney-truecoinvalue" style="color:#a6e09c;font-size:13px;display:none;margin-top:2px;"></div>
+  // Helper: wait for Clusterize to be loaded if needed
+  function loadClusterizeIfNeeded(callback) {
+    if (window.Clusterize) return callback();
+    const script = document.createElement('script');
+    script.src = CLUSTERIZE_JS;
+    script.onload = () => callback();
+    document.head.appendChild(script);
+  }
+
+  // AMM calculation (provided)
+  const coinValueCalcWithoutK = (price, quantity) => {
+    const k = 1_000_000_000_000;
+    const C = Math.sqrt(k / price);
+    const B = k / C;
+    return B - k / (C + quantity);
+  };
+
+  // Invert AMM: calculate coin quantity from desired value
+  function ammQuantityFromValue(price, value) {
+    // If value is not positive, return 0
+    if (!price || !value || value <= 0) return 0;
+    const k = 1_000_000_000_000;
+    const C = Math.sqrt(k / price);
+    const B = k / C;
+    // Solve for quantity: B - k/(C + q) = value
+    // B - value = k/(C+q)
+    // C+q = k/(B-value)
+    // q = k/(B-value) - C
+    // Clamp to non-negative value
+    const denom = B - value;
+    if (denom <= 0) return 0;
+    const q = k / denom - C;
+    return q > 0 ? q : 0;
+  }
+
+  function getCoinItemHtml(h) {
+    return `<div class="rp-cluster-coin-item" tabindex="0" data-symbol="${h.symbol}" style="padding:5px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;">
+      <span style="flex:1;">${h.symbol}</span><span style="font-size:13px;color:#ccc;">(${h.quantity.toFixed(6)} available)</span>
+    </div>`;
+  }
+  const coinDisclaimerHtml = `
+    <div id="rp-sendmoney-coindisclaimer" style="color:#e69734;padding:3px 0 6px 0;font-size:13px;display:none;">
+      <b>Note:</b> The server currently uses an incorrect value calculation for coins.<br>
+      The value above is what the server uses, but the <b>true value</b> is shown below.
+    </div>
+  `;
+
+  // Modal UI
+  modal.innerHTML = `
+    <div style="
+      background: var(--background, #19191f);
+      color: var(--foreground, #eee);
+      min-width:350px;
+      max-width:95vw;
+      box-shadow:0 4px 32px rgba(0,0,0,.18);
+      border-radius:12px;
+      padding:32px 28px;
+      font-size:16px;
+      position:relative;">
+      <button id="rp-modal-close" style="position:absolute;top:11px;right:12px;font-size:20px;background:none;border:none;color:#888;cursor:pointer;">×</button>
+      <div style="margin-bottom:16px;font-weight:600;font-size:20px;display:flex;gap:10px;align-items:center;">
+        <svg style="height:22px;width:22px;vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M17 8V5a5 5 0 0 0-10 0v3"/><rect width="20" height="14" x="2" y="8" rx="2" /><path d="M12 12v4"/><path d="M8 16h8"/></svg>
+        Send Money / Coins
       </div>
+      <form id="rp-sendmoney-form" autocomplete="off">
+        <div style="margin-bottom:12px;">
+          <label style="font-weight:500;">Recipient Username</label>
+          <input type="text" id="rp-sendmoney-recipient" autocomplete="off" placeholder="Enter username (without @)" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="font-weight:500;">Type</label>
+          <select id="rp-sendmoney-type" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+            <option value="CASH">Cash ($)</option>
+            <option value="COIN" ${coinHoldings.length === 0 ? 'disabled' : ''}>Coins</option>
+          </select>
+        </div>
+        <div id="rp-sendmoney-coinblock" style="margin-bottom:12px;display:none;">
+          <label style="font-weight:500;">Select Coin</label>
+          <div id="rp-coin-search-wrap" style="position:relative;">
+            <input id="rp-sendmoney-coinsearch" autocomplete="off" placeholder="Search coin symbol..." style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+            <div id="rp-sendmoney-coindrop" style="position:absolute;left:0;right:0;top:40px;z-index:20;background:#222;border-radius:7px;box-shadow:0 6px 32px rgba(0,0,0,0.16);display:none;max-height:192px;border:1px solid #2a2e38;">
+              <div id="rp-clusterize-scroll" style="max-height:192px;overflow-y:auto;">
+                <div id="rp-clusterize-content"></div>
               </div>
             </div>
-            <div id="rp-sendmoney-min-msg" style="color:#d97b42;font-size:13px;display:none;margin-bottom:9px;"></div>
-            <div id="rp-sendmoney-error" style="color:#d97b42;font-size:14px;display:none;margin-bottom:9px;"></div>
-            <div style="margin-top:24px;display:flex;gap:10px;">
-              <button type="button" id="rp-sendmoney-cancel" style="background:#383c4a;color:#ccc;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Cancel</button>
-              <button type="submit" id="rp-sendmoney-sendbtn" style="background:var(--primary,#3066fa);color:var(--primary-foreground,#fff);font-weight:600;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Send</button>
-            </div>
-          </form>
+          </div>
+          <div style="margin-top:10px;">
+            <label style="font-weight:500;">
+              Enter <span id="rp-sendmoney-toggle-label">coin amount</span>
+              <span id="rp-sendmoney-toggle-wrap" style="margin-left:12px;">
+                <button id="rp-sendmoney-toggle" type="button" style="font-size:13px;background:#232334;border-radius:4px;border:1px solid #383c4a;color:#eee;padding:3px 10px;cursor:pointer;">Switch to value</button>
+              </span>
+            </label>
+          </div>
         </div>
+        <div style="margin-bottom:10px;">
+          <label id="rp-sendmoney-amtlabel" style="font-weight:500;">Amount ($)</label>
+          <div style="display:flex;gap:6px;">
+            <input type="number" id="rp-sendmoney-amount" min="0" autocomplete="off" step="0.01" placeholder="0.00" style="flex:1;padding:7px 8px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+            <button type="button" id="rp-sendmoney-max" style="background:#3a4157;color:#fff;font-weight:500;padding:7px 12px;border-radius:5px;border:none;cursor:pointer;">Max</button>
+          </div>
+          <div style="margin:2px 0 0 2px;font-size:13px;color:#aaa;">
+            <span id="rp-sendmoney-available"></span>
+            <span id="rp-sendmoney-coinvalue" style="margin-left:10px;"></span>
+            <div id="rp-sendmoney-coindisclaimer-container">
+              ${coinDisclaimerHtml}
+              <div id="rp-sendmoney-truecoinvalue" style="color:#a6e09c;font-size:13px;display:none;margin-top:2px;"></div>
+            </div>
+          </div>
+        </div>
+        <div id="rp-sendmoney-min-msg" style="color:#d97b42;font-size:13px;display:none;margin-bottom:9px;"></div>
+        <div id="rp-sendmoney-error" style="color:#d97b42;font-size:14px;display:none;margin-bottom:9px;"></div>
+        <div style="margin-top:24px;display:flex;gap:10px;">
+          <button type="button" id="rp-sendmoney-cancel" style="background:#383c4a;color:#ccc;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Cancel</button>
+          <button type="submit" id="rp-sendmoney-sendbtn" style="background:var(--primary,#3066fa);color:var(--primary-foreground,#fff);font-weight:600;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Send</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  // --- Inputs ---
+  const typeSel = modal.querySelector('#rp-sendmoney-type');
+  const coinSelBlock = modal.querySelector('#rp-sendmoney-coinblock');
+  const coinSearchInput = modal.querySelector('#rp-sendmoney-coinsearch');
+  const coinDrop = modal.querySelector('#rp-sendmoney-coindrop');
+  const amtLabel = modal.querySelector('#rp-sendmoney-amtlabel');
+  const amountInput = modal.querySelector('#rp-sendmoney-amount');
+  const maxBtn = modal.querySelector('#rp-sendmoney-max');
+  const errorDiv = modal.querySelector('#rp-sendmoney-error');
+  const minMsg = modal.querySelector('#rp-sendmoney-min-msg');
+  const availableSpan = modal.querySelector('#rp-sendmoney-available');
+  const coinValueSpan = modal.querySelector('#rp-sendmoney-coinvalue');
+  const cancelBtn = modal.querySelector('#rp-sendmoney-cancel');
+  const closeBtn = modal.querySelector('#rp-modal-close');
+  const coinDisclaimerDiv = modal.querySelector('#rp-sendmoney-coindisclaimer');
+  const trueCoinValueDiv = modal.querySelector('#rp-sendmoney-truecoinvalue');
+  const coinBlockToggleBtn = modal.querySelector('#rp-sendmoney-toggle');
+  const coinBlockToggleLabel = modal.querySelector('#rp-sendmoney-toggle-label');
+  const coinBlockToggleWrap = modal.querySelector('#rp-sendmoney-toggle-wrap');
+
+  let transferType = typeSel.value;
+  let clusterizeApi = null;
+  let clusterizeCurList = [];
+  let coinSearchFocused = false;
+
+  const getCoinHolding = (symbol) => coinHoldings.find((h) => h.symbol === symbol);
+
+  function renderCoinClusterList(filteredCoins) {
+    return filteredCoins.map(getCoinItemHtml);
+  }
+  function fuzzyMatchCoin(haystack, needle) {
+    haystack = haystack.toLowerCase();
+    needle = needle.toLowerCase();
+    let hIdx = 0, nIdx = 0;
+    while (hIdx < haystack.length && nIdx < needle.length) {
+      if (haystack[hIdx] === needle[nIdx]) nIdx++;
+      hIdx++;
+    }
+    return nIdx === needle.length;
+  }
+  function filterCoinsForSearch(query) {
+    if (!query) return coinHoldings;
+    return coinHoldings.filter((h) => fuzzyMatchCoin(h.symbol, query));
+  }
+  function setupClusterizeForCoins() {
+    loadClusterizeIfNeeded(() => {
+      const rows = renderCoinClusterList(coinHoldings);
+      clusterizeApi = new Clusterize({
+        rows,
+        scrollId: 'rp-clusterize-scroll',
+        contentId: 'rp-clusterize-content',
+        no_data_text: 'No coins found'
+      });
+      clusterizeCurList = coinHoldings;
+    });
+  }
+  function updateClusterize(query) {
+    if (!window.Clusterize) return;
+    const filtered = filterCoinsForSearch(query);
+    clusterizeCurList = filtered;
+    clusterizeApi.update(renderCoinClusterList(filtered));
+    setTimeout(() => {
+      // Optionally scroll to top or focus first
+    }, 0);
+  }
+
+  function showCoinDropdown() {
+    if (coinHoldings.length === 0) return;
+    coinDrop.style.display = '';
+    updateClusterize(coinSearchInput.value);
+  }
+  function hideCoinDropdown() {
+    coinDrop.style.display = 'none';
+  }
+  function completeToCoin(idx = 0) {
+    if (clusterizeCurList.length === 0) return;
+    const h = clusterizeCurList[idx];
+    selectedCoinSymbol = h.symbol;
+    coinSearchInput.value = h.symbol;
+    hideCoinDropdown();
+    updateCoinInputs();
+  }
+  function onClusterCoinClick(e) {
+    let el = e.target;
+    while (el && !el.dataset?.symbol && el !== coinDrop) el = el.parentNode;
+    if (!el || !el.dataset.symbol) return;
+    selectedCoinSymbol = el.dataset.symbol;
+    coinSearchInput.value = selectedCoinSymbol;
+    hideCoinDropdown();
+    updateCoinInputs();
+    coinSearchInput.blur();
+  }
+
+  // Toggle between "amount" and "value" input modes
+  function updateCoinBlockToggle() {
+    if (transferType !== 'COIN') {
+      coinBlockToggleWrap.style.display = 'none';
+      coinBlockToggleLabel.textContent = '';
+      return;
+    }
+    coinBlockToggleWrap.style.display = '';
+    if (coinInputMode === 'amount') {
+      coinBlockToggleLabel.textContent = 'coin amount';
+      coinBlockToggleBtn.textContent = 'Switch to value';
+      amountInput.step = '0.000001';
+      amountInput.placeholder = '0.000000';
+    } else {
+      coinBlockToggleLabel.textContent = 'actual value';
+      coinBlockToggleBtn.textContent = 'Switch to amount';
+      amountInput.step = '0.01';
+      amountInput.placeholder = '0.00';
+    }
+    amountInput.value = '';
+    updateCoinInputs();
+  }
+
+  coinBlockToggleBtn.addEventListener('click', () => {
+    coinInputMode = coinInputMode === 'amount' ? 'value' : 'amount';
+    updateCoinBlockToggle();
+  });
+
+  // --- Modal logic ---
+  function updateAvailableInfo() {
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+
+    let numericAmount = parseFloat(amountInput.value) || 0;
+    let displayCoinAmount = numericAmount;
+    let usedValue = 0;
+    let displayValue = 0;
+
+    // If coin mode and "value" input, recalculate amount
+    if (
+      transferType === 'COIN' &&
+      selectedHolding &&
+      numericAmount > 0 &&
+      coinInputMode === 'value'
+    ) {
+      // User entered target value, calculate coin quantity to send via AMM
+      displayCoinAmount = ammQuantityFromValue(selectedHolding.currentPrice, numericAmount);
+      numericAmount = displayCoinAmount;
+      // What is the "server" value for this amount? (quantity * currentPrice)
+      usedValue = displayCoinAmount * selectedHolding.currentPrice;
+      // True AMM value
+      displayValue = coinValueCalcWithoutK(selectedHolding.currentPrice, displayCoinAmount);
+    }
+
+    availableSpan.innerHTML =
+      transferType === 'CASH'
+        ? `Available: $${userBalance.toFixed(2)}`
+        : selectedHolding
+        ? `Available: ${selectedHolding.quantity.toFixed(6)} ${selectedHolding.symbol}`
+        : 'Available: 0';
+
+    if (transferType === 'COIN' && selectedHolding && numericAmount > 0) {
+      let serverEstValue, trueEstValue;
+
+      if (coinInputMode === 'value') {
+        // Input is value, coin calculated above
+        serverEstValue = usedValue;
+        trueEstValue = displayValue;
+        coinValueSpan.textContent = `Server Estimated Value: ≈ $${serverEstValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (amount: ${displayCoinAmount.toFixed(6)} ${selectedCoinSymbol})`;
+      } else {
+        // Input is coin amount
+        serverEstValue = numericAmount * selectedHolding.currentPrice;
+        trueEstValue = coinValueCalcWithoutK(selectedHolding.currentPrice, numericAmount);
+        coinValueSpan.textContent = `≈ $${serverEstValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      }
+
+      coinDisclaimerDiv.style.display = '';
+      trueCoinValueDiv.style.display = '';
+
+      trueCoinValueDiv.innerHTML = `
+        True estimated value: ≈ $${trueEstValue.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
       `;
+    } else {
+      coinValueSpan.textContent = '';
+      coinDisclaimerDiv.style.display = 'none';
+      trueCoinValueDiv.style.display = 'none';
+    }
+  }
 
-      document.body.appendChild(modal);
+  function updateCoinInputs() {
+    transferType = typeSel.value;
 
-      // --- Inputs ---
-      const typeSel = modal.querySelector('#rp-sendmoney-type');
-      const coinSelBlock = modal.querySelector('#rp-sendmoney-coinblock');
-      const coinSearchInput = modal.querySelector('#rp-sendmoney-coinsearch');
-      const coinDrop = modal.querySelector('#rp-sendmoney-coindrop');
-      const amtLabel = modal.querySelector('#rp-sendmoney-amtlabel');
-      const amountInput = modal.querySelector('#rp-sendmoney-amount');
-      const maxBtn = modal.querySelector('#rp-sendmoney-max');
-      const errorDiv = modal.querySelector('#rp-sendmoney-error');
-      const minMsg = modal.querySelector('#rp-sendmoney-min-msg');
-      const availableSpan = modal.querySelector('#rp-sendmoney-available');
-      const coinValueSpan = modal.querySelector('#rp-sendmoney-coinvalue');
-      const cancelBtn = modal.querySelector('#rp-sendmoney-cancel');
-      const closeBtn = modal.querySelector('#rp-modal-close');
-        const coinDisclaimerDiv = modal.querySelector('#rp-sendmoney-coindisclaimer');
-      const trueCoinValueDiv = modal.querySelector('#rp-sendmoney-truecoinvalue');
-
-      let transferType = typeSel.value;
-      let clusterizeApi = null;
-      let clusterizeCurList = [];
-      let coinSearchFocused = false;
-
-      const getCoinHolding = (symbol) => coinHoldings.find((h) => h.symbol === symbol);
-
-      // --- COIN SEARCH/SELECT CLUSTERIZE INIT ---
-      function renderCoinClusterList(filteredCoins) {
-        return filteredCoins.map(getCoinItemHtml);
+    if (transferType === 'COIN') {
+      coinSelBlock.style.display = coinHoldings.length > 0 ? '' : 'none';
+      amtLabel.textContent =
+        coinInputMode === 'amount'
+          ? `Amount (${selectedCoinSymbol || '...'})`
+          : `Amount ($ actual value)`;
+      updateCoinBlockToggle();
+      // focus & empty by default on switch
+      if (!coinSearchFocused) {
+        coinSearchInput.value = '';
+        showCoinDropdown();
+        setTimeout(() => coinSearchInput.focus(), 16);
       }
-      function fuzzyMatchCoin(haystack, needle) {
-        // Simple fuzzy: all chars of needle appear in order in haystack (case-insensitive)
-        haystack = haystack.toLowerCase();
-        needle = needle.toLowerCase();
-        let hIdx = 0, nIdx = 0;
-        while (hIdx < haystack.length && nIdx < needle.length) {
-          if (haystack[hIdx] === needle[nIdx]) nIdx++;
-          hIdx++;
-        }
-        return nIdx === needle.length;
-      }
-      function filterCoinsForSearch(query) {
-        if (!query) return coinHoldings;
-        return coinHoldings.filter(
-          (h) => fuzzyMatchCoin(h.symbol, query)
+    } else {
+      coinSelBlock.style.display = 'none';
+      amtLabel.textContent = 'Amount ($)';
+      amountInput.step = '0.01';
+      amountInput.placeholder = '0.00';
+      coinInputMode = 'amount'; // fallback to amount for cash
+    }
+    updateAvailableInfo();
+    validateAll();
+  }
+
+  // -- Init coin search dropdown and listeners
+  setupClusterizeForCoins();
+  coinSearchInput.addEventListener('focus', () => {
+    coinSearchFocused = true;
+    showCoinDropdown();
+  });
+  coinSearchInput.addEventListener('blur', () => {
+    setTimeout(() => { coinSearchFocused = false; hideCoinDropdown(); }, 150);
+  });
+  coinSearchInput.addEventListener('input', (e) => {
+    updateClusterize(coinSearchInput.value);
+  });
+  coinSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      completeToCoin(0);
+    }
+  });
+  coinDrop.addEventListener('mousedown', function (e) {
+    onClusterCoinClick(e);
+  });
+
+  typeSel.addEventListener('change', () => {
+    transferType = typeSel.value;
+    if (transferType === 'COIN') {
+      selectedCoinSymbol = '';
+      coinSearchInput.value = '';
+      showCoinDropdown();
+      setTimeout(() => coinSearchInput.focus(), 16);
+    } else {
+      coinSearchInput.value = '';
+      hideCoinDropdown();
+    }
+    coinInputMode = transferType === 'COIN' ? coinInputMode : 'amount';
+    amountInput.value = '';
+    updateCoinInputs();
+  });
+
+  amountInput.addEventListener('input', () => {
+    updateAvailableInfo();
+    validateAll();
+  });
+
+  maxBtn.addEventListener('click', () => {
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+    let maxAmount =
+      transferType === 'CASH'
+        ? userBalance
+        : selectedHolding
+        ? selectedHolding.quantity
+        : 0;
+
+    if (transferType === 'COIN' && coinInputMode === 'value' && selectedHolding) {
+      // In value mode, max value is AMM value for user's quantity
+      maxAmount = coinValueCalcWithoutK(selectedHolding.currentPrice, selectedHolding.quantity);
+    }
+
+    amountInput.value = maxAmount;
+    updateAvailableInfo();
+    validateAll();
+  });
+
+  const validateAll = () => {
+    errorDiv.style.display = 'none';
+    minMsg.style.display = 'none';
+    const recipient = modal.querySelector('#rp-sendmoney-recipient').value.trim();
+    let numericAmount = parseFloat(amountInput.value) || 0;
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+
+    // If coin mode and value, get coin amount for given value
+    if (
+      transferType === 'COIN' &&
+      selectedHolding &&
+      numericAmount > 0 &&
+      coinInputMode === 'value'
+    ) {
+      numericAmount = ammQuantityFromValue(selectedHolding.currentPrice, numericAmount);
+    }
+
+    const hasValidAmount = numericAmount > 0;
+    const hasValidRecipient = recipient.length > 0;
+    const hasEnoughFunds =
+      transferType === 'CASH'
+        ? numericAmount <= userBalance
+        : selectedHolding
+        ? numericAmount <= selectedHolding.quantity
+        : false;
+
+    // The minimum value check should STILL use server calculation: coinAmount * price
+    const estimatedValue =
+      transferType === 'COIN' &&
+      selectedHolding &&
+      numericAmount > 0
+        ? numericAmount * selectedHolding.currentPrice
+        : transferType === 'CASH'
+        ? numericAmount
+        : 0;
+
+    const isWithinCashLimit =
+      transferType === 'CASH' ? numericAmount >= 10 : true;
+    const isWithinCoinValueLimit =
+      transferType === 'COIN' ? estimatedValue >= 10 : true;
+
+    const canSend =
+      hasValidAmount &&
+      hasValidRecipient &&
+      hasEnoughFunds &&
+      isWithinCashLimit &&
+      isWithinCoinValueLimit;
+
+    if (!hasEnoughFunds && hasValidAmount) {
+      minMsg.textContent = `Insufficient ${transferType === 'CASH' ? 'funds' : 'coins'}`;
+      minMsg.style.display = '';
+    } else if (!isWithinCashLimit && hasValidAmount) {
+      minMsg.textContent = `Cash transfers require a minimum of $10.00`;
+      minMsg.style.display = '';
+    } else if (!isWithinCoinValueLimit && hasValidAmount) {
+      minMsg.textContent = `Coin transfers require a minimum estimated value of $10.00 (server calculation)`;
+      minMsg.style.display = '';
+    }
+
+    modal.querySelector('#rp-sendmoney-sendbtn').disabled = !canSend;
+  };
+
+  updateCoinInputs();
+
+  // Modal close
+  cancelBtn.addEventListener('click', () => modal.remove());
+  closeBtn.addEventListener('click', () => modal.remove());
+
+  // Submission handler
+  modal.querySelector('#rp-sendmoney-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorDiv.style.display = 'none';
+    minMsg.style.display = 'none';
+
+    const recipient = modal.querySelector('#rp-sendmoney-recipient').value.trim();
+    let inputValue = parseFloat(amountInput.value) || 0;
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+
+    // If coin mode and value, convert value to coin amount before submit
+    let sendAmount = inputValue;
+    if (
+      transferType === 'COIN' &&
+      selectedHolding &&
+      inputValue > 0 &&
+      coinInputMode === 'value'
+    ) {
+      sendAmount = ammQuantityFromValue(selectedHolding.currentPrice, inputValue);
+    }
+
+    const postBody = {
+      recipientUsername: recipient,
+      type: transferType,
+      amount: sendAmount,
+      coinSymbol: transferType === 'COIN' ? selectedCoinSymbol : undefined,
+    };
+
+    // Double safety validation
+    if (!recipient || !(sendAmount > 0)) {
+      errorDiv.textContent = 'Missing recipient or amount';
+      errorDiv.style.display = '';
+      return;
+    }
+    const hasEnoughFunds =
+      transferType === 'CASH'
+        ? sendAmount <= userBalance
+        : selectedHolding
+        ? sendAmount <= selectedHolding.quantity
+        : false;
+    const estimatedValue =
+      transferType === 'COIN' && selectedHolding && sendAmount > 0
+        ? sendAmount * selectedHolding.currentPrice
+        : transferType === 'CASH'
+        ? sendAmount
+        : 0;
+    const isWithinCashLimit = transferType === 'CASH' ? sendAmount >= 10 : true;
+    const isWithinCoinValueLimit = transferType === 'COIN' ? estimatedValue >= 10 : true;
+    if (!hasEnoughFunds || !isWithinCashLimit || !isWithinCoinValueLimit) {
+      errorDiv.textContent = 'Not enough funds or minimum not met';
+      errorDiv.style.display = '';
+      validateAll();
+      return;
+    }
+
+    // Button loading state
+    const sendButton = modal.querySelector('#rp-sendmoney-sendbtn');
+    sendButton.disabled = true;
+    sendButton.textContent = 'Sending...';
+
+    try {
+      const resp = await fetch('/api/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(postBody),
+      });
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result.message || result.error || 'Transfer failed');
+      if (result.type === 'CASH') {
+        alert(`✔ Money sent! Sent $${result.amount.toFixed(2)} to @${result.recipient}`);
+      } else {
+        alert(
+          `✔ Coins sent! Sent ${result.amount.toFixed(6)} ${result.coinSymbol} (≈$${(result.amount*selectedHolding.currentPrice).toFixed(
+            2
+          )}) to @${result.recipient}`
         );
       }
-      function setupClusterizeForCoins() {
-        loadClusterizeIfNeeded(() => {
-          const rows = renderCoinClusterList(coinHoldings);
-          clusterizeApi = new Clusterize({
-            rows,
-            scrollId: 'rp-clusterize-scroll',
-            contentId: 'rp-clusterize-content',
-            no_data_text: 'No coins found'
-          });
-          clusterizeCurList = coinHoldings;
-        });
-      }
-      function updateClusterize(query) {
-        if (!window.Clusterize) return;
-        const filtered = filterCoinsForSearch(query);
-        clusterizeCurList = filtered;
-        clusterizeApi.update(renderCoinClusterList(filtered));
-        setTimeout(() => {
-          // Optionally scroll to top or focus first
-        }, 0);
-      }
-
-      // Handle coin select dropdown show/hide and select behavior
-      function showCoinDropdown() {
-        if (coinHoldings.length === 0) return;
-        coinDrop.style.display = '';
-        updateClusterize(coinSearchInput.value);
-      }
-      function hideCoinDropdown() {
-        coinDrop.style.display = 'none';
-      }
-      function completeToCoin(idx = 0) {
-        if (clusterizeCurList.length === 0) return;
-        const h = clusterizeCurList[idx];
-        selectedCoinSymbol = h.symbol;
-        coinSearchInput.value = h.symbol;
-        hideCoinDropdown();
-        updateCoinInputs();
-      }
-      // Handle click and keyboard
-      function onClusterCoinClick(e) {
-        let el = e.target;
-        while (el && !el.dataset?.symbol && el !== coinDrop) el = el.parentNode;
-        if (!el || !el.dataset.symbol) return;
-        selectedCoinSymbol = el.dataset.symbol;
-        coinSearchInput.value = selectedCoinSymbol;
-        hideCoinDropdown();
-        updateCoinInputs();
-        // Remove focus from input for clarity
-        coinSearchInput.blur();
-      }
-
-      // --- Modal logic ---
-     function updateAvailableInfo() {
-        const numericAmount = parseFloat(amountInput.value) || 0;
-        const selectedHolding = getCoinHolding(selectedCoinSymbol);
-
-        availableSpan.innerHTML =
-          transferType === 'CASH'
-            ? `Available: $${userBalance.toFixed(2)}`
-            : selectedHolding
-            ? `Available: ${selectedHolding.quantity.toFixed(6)} ${selectedHolding.symbol}`
-            : 'Available: 0';
-
-        if (
-          transferType === 'COIN' &&
-          selectedHolding &&
-          numericAmount > 0
-        ) {
-          // "Wrong/server" calculation:
-          const serverEstValue = numericAmount * selectedHolding.currentPrice;
-
-          // "True" calculation: use coinValueCalcWithoutK (inputs: currentPrice, quantity)
-          const trueEstValue = coinValueCalcWithoutK(selectedHolding.currentPrice, numericAmount);
-
-          coinValueSpan.textContent = `≈ $${serverEstValue.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`;
-
-          coinDisclaimerDiv.style.display = '';
-          trueCoinValueDiv.style.display = '';
-
-          trueCoinValueDiv.innerHTML = `
-            True estimated value: ≈ $${trueEstValue.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
-          `;
-        } else {
-          coinValueSpan.textContent = '';
-          coinDisclaimerDiv.style.display = 'none';
-          trueCoinValueDiv.style.display = 'none';
-        }
-      }
-
-      function updateCoinInputs() {
-        transferType = typeSel.value;
-        if (transferType === 'COIN') {
-          coinSelBlock.style.display = coinHoldings.length > 0 ? '' : 'none';
-          amtLabel.textContent = `Amount (${selectedCoinSymbol || '...'})`;
-          amountInput.step = '0.000001';
-          amountInput.placeholder = '0.000000';
-          // focus & empty by default on switch
-          if (!coinSearchFocused) {
-            coinSearchInput.value = '';
-            showCoinDropdown();
-            setTimeout(() => coinSearchInput.focus(), 16);
-          }
-        } else {
-          coinSelBlock.style.display = 'none';
-          amtLabel.textContent = 'Amount ($)';
-          amountInput.step = '0.01';
-          amountInput.placeholder = '0.00';
-        }
-        updateAvailableInfo();
-        validateAll();
-      }
-
-      // -- Init coin search dropdown and listeners
-      setupClusterizeForCoins();
-      // Show/hide dropdown on input click
-      coinSearchInput.addEventListener('focus', () => {
-        coinSearchFocused = true;
-        showCoinDropdown();
-      });
-      coinSearchInput.addEventListener('blur', () => {
-        setTimeout(() => { coinSearchFocused = false; hideCoinDropdown(); }, 150);
-      });
-      // Fuzzy filter
-      coinSearchInput.addEventListener('input', (e) => {
-        updateClusterize(coinSearchInput.value);
-      });
-      // Key selection and Enter
-      coinSearchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          completeToCoin(0);
-        }
-        // Optionally add Arrow controls later
-      });
-      // Clusterize dropdown click
-      coinDrop.addEventListener('mousedown', function(e) {
-        // Use mousedown to select before blur!
-        onClusterCoinClick(e);
-      });
-
-      // On Coin mode select
-      typeSel.addEventListener('change', () => {
-        transferType = typeSel.value;
-        if (transferType === 'COIN') {
-          selectedCoinSymbol = '';
-          coinSearchInput.value = '';
-          showCoinDropdown();
-          setTimeout(() => coinSearchInput.focus(), 16);
-        } else {
-          coinSearchInput.value = '';
-          hideCoinDropdown();
-        }
-        amountInput.value = '';
-        updateCoinInputs();
-      });
-
-      amountInput.addEventListener('input', () => {
-        updateAvailableInfo();
-        validateAll();
-      });
-
-      maxBtn.addEventListener('click', () => {
-        const selectedHolding = getCoinHolding(selectedCoinSymbol);
-        const maxAmount =
-          transferType === 'CASH'
-            ? userBalance
-            : selectedHolding
-            ? selectedHolding.quantity
-            : 0;
-        amountInput.value =
-          transferType === 'CASH'
-            ? Math.max(maxAmount, 10)
-            : maxAmount;
-        updateAvailableInfo();
-        validateAll();
-      });
-
-
-      const validateAll = () => {
-        errorDiv.style.display = 'none';
-        minMsg.style.display = 'none';
-        const recipient = modal.querySelector('#rp-sendmoney-recipient').value.trim();
-        const numericAmount = parseFloat(amountInput.value) || 0;
-        const selectedHolding = getCoinHolding(selectedCoinSymbol);
-        const hasValidAmount = numericAmount > 0;
-        const hasValidRecipient = recipient.length > 0;
-        const hasEnoughFunds =
-          transferType === 'CASH'
-            ? numericAmount <= userBalance
-            : selectedHolding
-            ? numericAmount <= selectedHolding.quantity
-            : false;
-        const estimatedValue =
-          transferType === 'COIN' &&
-          selectedHolding &&
-          numericAmount > 0
-            ? numericAmount * selectedHolding.currentPrice
-            : 0;
-        const isWithinCashLimit =
-          transferType === 'CASH' ? numericAmount >= 10 : true;
-        const isWithinCoinValueLimit =
-          transferType === 'COIN' ? estimatedValue >= 10 : true;
-        const canSend =
-          hasValidAmount &&
-          hasValidRecipient &&
-          hasEnoughFunds &&
-          isWithinCashLimit &&
-          isWithinCoinValueLimit;
-
-        if (!hasEnoughFunds && hasValidAmount) {
-          minMsg.textContent = `Insufficient ${transferType === 'CASH' ? 'funds' : 'coins'}`;
-          minMsg.style.display = '';
-        } else if (!isWithinCashLimit && hasValidAmount) {
-          minMsg.textContent = `Cash transfers require a minimum of $10.00`;
-          minMsg.style.display = '';
-        } else if (!isWithinCoinValueLimit && hasValidAmount) {
-          minMsg.textContent = `Coin transfers require a minimum estimated value of $10.00`;
-          minMsg.style.display = '';
-        }
-
-        modal.querySelector('#rp-sendmoney-sendbtn').disabled = !canSend;
-      };
-
-      updateCoinInputs();
-
-      // Modal close
-      cancelBtn.addEventListener('click', () => modal.remove());
-      closeBtn.addEventListener('click', () => modal.remove());
-
-      // Submission handler
-      modal.querySelector('#rp-sendmoney-form').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        errorDiv.style.display = 'none';
-        minMsg.style.display = 'none';
-
-        const recipient = modal.querySelector('#rp-sendmoney-recipient').value.trim();
-        const numericAmount = parseFloat(amountInput.value) || 0;
-        const selectedHolding = getCoinHolding(selectedCoinSymbol);
-
-        const postBody = {
-          recipientUsername: recipient,
-          type: transferType,
-          amount: numericAmount,
-          coinSymbol: transferType === 'COIN' ? selectedCoinSymbol : undefined,
-        };
-
-        // Double safety validation
-        if (!recipient || !(numericAmount > 0)) {
-          errorDiv.textContent = 'Missing recipient or amount';
-          errorDiv.style.display = '';
-          return;
-        }
-        const hasEnoughFunds =
-          transferType === 'CASH'
-            ? numericAmount <= userBalance
-            : selectedHolding
-            ? numericAmount <= selectedHolding.quantity
-            : false;
-        const estimatedValue =
-          transferType === 'COIN' && selectedHolding && numericAmount > 0
-            ? numericAmount * selectedHolding.currentPrice
-            : 0;
-        const isWithinCashLimit = transferType === 'CASH' ? numericAmount >= 10 : true;
-        const isWithinCoinValueLimit = transferType === 'COIN' ? estimatedValue >= 10 : true;
-        if (!hasEnoughFunds || !isWithinCashLimit || !isWithinCoinValueLimit) {
-          errorDiv.textContent = 'Not enough funds or minimum not met';
-          errorDiv.style.display = '';
-          validateAll();
-          return;
-        }
-
-        // Button loading state
-        const sendButton = modal.querySelector('#rp-sendmoney-sendbtn');
-        sendButton.disabled = true;
-        sendButton.textContent = 'Sending...';
-
-        try {
-          const resp = await fetch('/api/transfer', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(postBody),
-          });
-          const result = await resp.json();
-          if (!resp.ok) throw new Error(result.message || result.error || 'Transfer failed');
-          if (result.type === 'CASH') {
-            alert(`✔ Money sent! Sent $${result.amount.toFixed(2)} to @${result.recipient}`);
-          } else {
-            alert(
-              `✔ Coins sent! Sent ${result.amount.toFixed(6)} ${result.coinSymbol} (≈$${estimatedValue.toFixed(
-                2
-              )}) to @${result.recipient}`
-            );
-          }
-          modal.remove();
-        } catch (e) {
-          errorDiv.textContent = `Transfer failed: ${(e || {}).message || e}`;
-          errorDiv.style.display = '';
-        } finally {
-          sendButton.disabled = false;
-          sendButton.textContent = 'Send';
-        }
-      });
+      modal.remove();
+    } catch (e) {
+      errorDiv.textContent = `Transfer failed: ${(e || {}).message || e}`;
+      errorDiv.style.display = '';
+    } finally {
+      sendButton.disabled = false;
+      sendButton.textContent = 'Send';
     }
+  });
+}
 
   } // End runPortfolioScript()
 
-  // --- Navigation API aware run logic ---
-  if ("navigation" in window) {
-    window.navigation.addEventListener('navigate', function (event) {
-      setTimeout(() => { if (isPortfolioPage()) runPortfolioScript(); }, 10);
-    });
-    if (isPortfolioPage()) runPortfolioScript();
-  } else {
-    if (isPortfolioPage()) runPortfolioScript();
+
+  onUrlChange();
+
+if (self.navigation) {
+  navigation.addEventListener('navigatesuccess', onUrlChange);
+} else {
+  let u = location.href;
+  new MutationObserver(() => u !== (u = location.href) && onUrlChange())
+    .observe(document, {subtree: true, childList: true});
+}
+
+function onUrlChange() {
+  if (isPortfolioPage()) {
+    console.log("on portfolio page")
+    runPortfolioScript()
   }
+}
 
 })();
