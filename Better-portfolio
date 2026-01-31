@@ -1,331 +1,971 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    http://tampermonkey.net/
-// @version      3.2.2
-// @description  Replace rugplay.com potfolio list with a better one
+// @version      3.5.0
+// @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
 // @match        https://rugplay.com/portfolio*
 // @match        https://*.rugplay.com/portfolio*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
-// @downloadURL    https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
+// @downloadURL  https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  'use strict';
 
-    // Clusterize.js CDN
-    const CLUSTERIZE_JS = "https://cdn.jsdelivr.net/npm/clusterize.js@1.0.0/clusterize.min.js";
-    const PORTFOLIO_API_PATH = '/api/portfolio';
-    const TRUNCATED_COUNT = 0;
-    let fullPortfolio = null;
+  // Config
+  const CLUSTERIZE_JS = 'https://cdn.jsdelivr.net/npm/clusterize.js@1.0.0/clusterize.min.js';
+  const PORTFOLIO_API_PATH = '/api/portfolio';
+  const TRUNCATED_COUNT = 0;
+  window.fullPortfolio = null;
 
-    function coinValueCalcWithoutK(price, quantity) {
-        const k = 1000000000000;
-        const C = Math.sqrt(k / price);
-        const B = k / C;
-        const value = B - (k / (C + quantity));
-        return value;
+  // --- UTILITIES ---
+  const coinValueCalcWithoutK = (price, quantity) => {
+    const k = 1_000_000_000_000;
+    const C = Math.sqrt(k / price);
+    const B = k / C;
+    return B - k / (C + quantity);
+  };
+
+  const injectClusterize = (callback) => {
+    if (window.Clusterize) return callback();
+    const s = document.createElement('script');
+    s.src = CLUSTERIZE_JS;
+    s.onload = callback;
+    document.head.appendChild(s);
+  };
+
+  // --- OVERRIDE FETCH FOR PORTFOLIO API PATCH ---
+  const origFetch = window.fetch;
+  window.fetch = async function (input, init) {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes(PORTFOLIO_API_PATH)) {
+      const resp = await origFetch.apply(this, arguments);
+      const clone = resp.clone();
+      const data = await clone.json();
+      if (Array.isArray(data.coinHoldings)) {
+        const patchedHoldings = data.coinHoldings.map((row) => {
+          const value = coinValueCalcWithoutK(Number(row.currentPrice), Number(row.quantity));
+          const costBasis = Number(row.costBasis);
+          const percentageChange = costBasis === 0 ? '' : ((value - costBasis) / costBasis) * 100;
+          return { ...row, value, percentageChange };
+        });
+        const totalCoinValue = patchedHoldings.reduce((sum, row) => sum + (row.value || 0), 0);
+        const totalValue = totalCoinValue + data.baseCurrencyBalance;
+        window.fullPortfolio = {
+          ...data,
+          coinHoldings: patchedHoldings,
+          totalCoinValue,
+          totalValue,
+        };
+        const truncated = { ...window.fullPortfolio, coinHoldings: patchedHoldings.slice(0, TRUNCATED_COUNT) };
+        return new Response(JSON.stringify(truncated), {
+          status: resp.status,
+          statusText: resp.statusText,
+          headers: resp.headers,
+        });
+      }
+      return resp;
     }
+    return origFetch.apply(this, arguments);
+  };
 
-    // ---- 1. Load Clusterize.js if not present ----
-    function injectClusterize(callback) {
-        if (window.Clusterize) return callback();
-        let s = document.createElement('script');
-        s.src = CLUSTERIZE_JS;
-        s.onload = callback;
-        document.head.appendChild(s);
-    }
+  const labelCase = (str) =>
+    str
+      ? str.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (s) => s.toUpperCase())
+      : '';
 
-    // ---- 2. Intercept API, store coinHoldings, pass empty to UI, recalc values ----
-    const origFetch = window.fetch;
-    window.fetch = async function(input, init) {
-        let url = (typeof input === "string") ? input : input.url;
-        if (url.includes(PORTFOLIO_API_PATH)) {
-            const resp = await origFetch.apply(this, arguments);
-            const clone = resp.clone();
-            let data = await clone.json();
-            if (Array.isArray(data.coinHoldings)) {
-                // Patch here: recalculate value and percentageChange and totalCoinValue
-                const patchedHoldings = data.coinHoldings.map(row => {
-                    const value = coinValueCalcWithoutK(Number(row.currentPrice), Number(row.quantity));
-                    const costBasis = Number(row.costBasis);
-                    const percentageChange = (costBasis === 0) ? "" : (value - costBasis) / costBasis * 100;
-                    return {
-                        ...row,
-                        value,
-                        percentageChange
-                    };
-                });
+  const formatNumberSmart = (val) => {
+    if (val == null || val === '') return '';
+    const n = Number(val);
+    if (isNaN(n)) return val;
+    const absN = Math.abs(n);
+    if (absN >= 1e9) return `${(n / 1e9).toFixed(5).replace(/\.?0+$/, '')}B`;
+    if (absN >= 1e6) return `${(n / 1e6).toFixed(5).replace(/\.?0+$/, '')}M`;
+    if (absN >= 1e3) return `${(n / 1e3).toFixed(5).replace(/\.?0+$/, '')}K`;
+    if (absN >= 1) return n.toFixed(5).replace(/\.?0+$/, '');
+    if (absN === 0) return 0;
+    return n.toExponential(5);
+  };
 
-                // Recalculate totalCoinValue
-                const totalCoinValue = patchedHoldings.reduce((sum, row) => sum + (row.value || 0), 0);
-                const totalValue = totalCoinValue + data.baseCurrencyBalance
+  const isRenderableNumber = (val) =>
+    !isNaN(val) && (typeof val === 'number' || /^\s*-?\d+(\.\d+)?\s*$/.test(val));
 
-                // Save patched fullPortfolio
-                fullPortfolio = {
-                    ...data,
-                    coinHoldings: patchedHoldings,
-                    totalCoinValue: totalCoinValue,
-                    totalValue: totalValue
-                };
+  // --- PORTFOLIO TABLE BUILD ---
+  function buildPortfolioTable(coinHoldings) {
+    if (!Array.isArray(coinHoldings)) return null;
 
-                let truncated = {...fullPortfolio};
-                truncated.coinHoldings = patchedHoldings.slice(0, TRUNCATED_COUNT);
+    // Get unique columns sorted by frequency
+    const keyFreq = {};
+    coinHoldings.forEach((row) => {
+      for (const k in row) keyFreq[k] = (keyFreq[k] || 0) + 1;
+    });
+    let cols = Object.keys(keyFreq).sort((a, b) => keyFreq[b] - keyFreq[a]);
+    cols = cols.filter((col) => col !== 'icon' && col !== 'avgPurchasePrice');
+    ['symbol', 'value'].reverse().forEach((key) => {
+      const i = cols.indexOf(key);
+      if (i >= 0) cols.splice(i, 1), cols.unshift(key);
+    });
 
-                return new Response(JSON.stringify(truncated), {
-                    status: resp.status,
-                    statusText: resp.statusText,
-                    headers: resp.headers
-                });
-            }
-            return resp;
-        } else {
-            return origFetch.apply(this, arguments);
-        }
+    const colDefs = cols.map((col) => ({
+      class: 'w-[12%] min-w-[70px]',
+      label: labelCase(col),
+    }));
+
+    const customHeaders = {
+      symbol: 'Token',
+      currentPrice: 'Price',
+      change24h: '24h Change',
+      percentageChange: 'P&L %',
     };
 
-    // ---- 3. Helper: camelCase → Label ----
-    function labelCase(str) {
-        if (!str) return "";
-        return str.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, s => s.toUpperCase());
-    }
-    // ---- 4. Format numbers smartly ----
-    function formatNumberSmart(val) {
-        if (val == null || val === "") return "";
-        let n = Number(val);
-        if (isNaN(n)) return val;
-        const absN = Math.abs(n);
-        if (absN >= 1e9) return (n / 1e9).toFixed(5).replace(/\.?0+$/, '') + "B";
-        if (absN >= 1e6) return (n / 1e6).toFixed(5).replace(/\.?0+$/, '') + "M";
-        if (absN >= 1e3) return (n / 1e3).toFixed(5).replace(/\.?0+$/, '') + "K";
-        if (absN >= 1) return n.toFixed(5).replace(/\.?0+$/, '');
-        if (absN === 0) return 0;
-        return n.toExponential(5);
-    }
-    function isRenderableNumber(val) {
-        return !isNaN(val) && (typeof val === "number" || /^\s*-?\d+(\.\d+)?\s*$/.test(val));
-    }
-    // ---- 5. Build table, search/sort, render ----
-    function buildPortfolioTable(coinHoldings) {
-        if (!Array.isArray(coinHoldings)) return null;
-        let cols = [];
-        const keyFreq = {};
-        for(const row of coinHoldings) for(const k in row) keyFreq[k] = (keyFreq[k]||0) + 1;
-        cols = Object.keys(keyFreq).sort((a,b) => keyFreq[b]-keyFreq[a]);
-        cols = cols.filter(col => col !== "icon").filter(col => col !== "avgPurchasePrice");
-        ['symbol','value'].reverse().forEach(key => { let i = cols.indexOf(key); if(i>=0){ cols.splice(i,1); cols.unshift(key);} });
-        const colDefs = [];
-        while (colDefs.length < cols.length) colDefs.push({class:"w-[12%] min-w-[70px]", label:labelCase(cols[colDefs.length])});
-        const customHeaders = {
-            symbol: "Token",
-            currentPrice: "Price",
-            change24h: "24h Change",
-            percentageChange: "P&L %",
-        };
-        const unique = `rpvt_${Math.random().toString(36).slice(2,10)}_${Date.now()}`;
-        const scrollId = `scrollArea_${unique}`;
-        const contentId = `contentArea_${unique}`;
+    const unique = `rpvt_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
+    const scrollId = `scrollArea_${unique}`;
+    const contentId = `contentArea_${unique}`;
 
-        const container = document.createElement("div");
-        container.className = "bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm mt-8";
-        container.setAttribute("data-slot", "card");
-        container.innerHTML = `
-        <div data-slot="card-header" class="grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6">
-          <div class="flex items-center justify-between flex-wrap">
-            <div>
-              <div data-slot="card-title" class="font-semibold leading-none flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide-icon lucide lucide-pie-chart h-5 w-5"><path d="M21.21 15.89A10 10 0 1 1 12 2" /><path d="M22 12A10 10 0 0 0 12 2v10z" /></svg>
-                Portfolio
-              </div>
-              <p data-slot="card-description" class="text-muted-foreground text-sm">Your tokens, sorted and searchable</p>
+    // Table container
+    const container = document.createElement('div');
+    container.className =
+      'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm mt-8';
+    container.setAttribute('data-slot', 'card');
+    container.innerHTML = `
+      <div data-slot="card-header" class="grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6">
+        <div class="flex items-center justify-between flex-wrap">
+          <div>
+            <div data-slot="card-title" class="font-semibold leading-none flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" ...class="lucide-icon lucide lucide-pie-chart h-5 w-5">...</svg>
+              Portfolio
             </div>
-            <div class="search-bar flex items-center ml-auto mt-2 md:mt-0" style="min-width:210px;">
-              <input type="text" id="customSearchInput" class="input input-search border rounded-md px-3 py-1 mr-2 text-sm" placeholder="Search holdings..." autocomplete="off" style="min-width:130px;">
-              <span class="count text-muted-foreground text-xs" id="searchCount"></span>
-            </div>
+            <p data-slot="card-description" class="text-muted-foreground text-sm">Your tokens, sorted and searchable</p>
+          </div>
+          <div class="search-bar flex items-center ml-auto mt-2 md:mt-0" style="min-width:210px;">
+            <input type="text" id="customSearchInput" class="input input-search border rounded-md px-3 py-1 mr-2 text-sm" placeholder="Search holdings..." autocomplete="off" style="min-width:130px;">
+            <span class="count text-muted-foreground text-xs" id="searchCount"></span>
           </div>
         </div>
-        <div data-slot="card-content" class="px-6">
-          <div data-slot="table-container" class="relative w-full overflow-x-auto">
-            <table data-slot="table" class="w-full caption-bottom text-sm" style="table-layout:fixed; min-width:600px;">
+      </div>
+      <div data-slot="card-content" class="px-6">
+        <div data-slot="table-container" class="relative w-full overflow-x-auto">
+          <table data-slot="table" class="w-full caption-bottom text-sm" style="table-layout:fixed; min-width:600px;">
+            <colgroup>
+              ${colDefs.map((def) => `<col class="${def.class}">`).join('')}
+            </colgroup>
+            <thead data-slot="table-header" class="[&>tr]:border-b">
+              <tr data-slot="table-row" class="hover:bg-muted/50 data-[state=selected]:bg-muted border-b transition-colors">
+                ${cols
+                  .map(
+                    (col, i) =>
+                      `<th data-slot="table-head"
+                        class="text-foreground h-10 whitespace-nowrap px-2 text-left align-middle font-medium cursor-pointer select-none ${colDefs[i].class}"
+                        style="user-select:none;"
+                        data-col="${col}"
+                        >${customHeaders[col] || labelCase(col)}</th>`
+                  )
+                  .join('')}
+              </tr>
+            </thead>
+          </table>
+          <div id="${scrollId}" style="max-height:660px; overflow-y:auto;">
+            <table class="w-full caption-bottom text-sm" style="table-layout:fixed;">
               <colgroup>
-                ${colDefs.map(def => `<col class="${def.class}">`).join('')}
+                ${colDefs.map((def) => `<col class="${def.class}">`).join('')}
               </colgroup>
-              <thead data-slot="table-header" class="[&>tr]:border-b">
-                <tr data-slot="table-row" class="hover:bg-muted/50 data-[state=selected]:bg-muted border-b transition-colors">
-                  ${cols.map((col,i) => `<th data-slot="table-head"
-                    class="text-foreground h-10 whitespace-nowrap px-2 text-left align-middle font-medium cursor-pointer select-none ${colDefs[i].class}"
-                    style="user-select:none;"
-                    data-col="${col}"
-                    >${customHeaders[col] || labelCase(col)}</th>`).join('')}
-                </tr>
-              </thead>
+              <tbody id="${contentId}" data-slot="table-body"></tbody>
             </table>
-            <div id="${scrollId}" style="max-height:660px; overflow-y:auto;">
-              <table class="w-full caption-bottom text-sm" style="table-layout:fixed;">
-                <colgroup>
-                  ${colDefs.map(def => `<col class="${def.class}">`).join('')}
-                </colgroup>
-                <tbody id="${contentId}" data-slot="table-body"></tbody>
-              </table>
+          </div>
+        </div>
+      </div>
+    `;
+
+    let dataSet = [...coinHoldings];
+    let filteredDataSet = [...coinHoldings];
+    let sortCol = 'value';
+    let sortDir = 'desc';
+    let lastSearch = '';
+    let clusterize = null;
+
+    // Render table rows
+    const renderRows = () =>
+      filteredDataSet.map((row) => {
+        const symbol = row[cols[0]];
+        const safeSymbol = String(symbol || '')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        return `<tr data-slot="table-row" class="data-[state=selected]:bg-muted border-b hover:bg-muted/50 cursor-pointer transition-colors" style="cursor:pointer"
+                  onclick="window.open('https://rugplay.com/coin/${encodeURIComponent(
+                    safeSymbol
+                  )}', '_self')">` +
+          cols
+            .map(
+              (col, i) =>
+                `<td data-slot="table-cell" class="whitespace-nowrap p-2 align-middle font-medium text-xs ${
+                  isRenderableNumber(row[col]) ? 'font-mono' : ''
+                } ${colDefs[i].class}" title="${row[col] ?? ''}">` +
+                (isRenderableNumber(row[col]) && Math.abs(Number(row[col])) >= 1000
+                  ? formatNumberSmart(row[col])
+                  : isRenderableNumber(row[col])
+                  ? formatNumberSmart(row[col])
+                  : row[col] ?? '') +
+                `</td>`
+            )
+            .join('') +
+          '</tr>';
+      });
+
+    // Sorting
+    const compareValues = (a, b) => {
+      if (a == null && b == null) return 0;
+      if (a == null) return -1;
+      if (b == null) return 1;
+      const numA = parseFloat(a);
+      const numB = parseFloat(b);
+      const isNumA = !isNaN(numA) && a !== '';
+      const isNumB = !isNaN(numB) && b !== '';
+      if (isNumA && isNumB) return numA - numB;
+      return String(a).localeCompare(String(b), undefined, { sensitivity: 'base' });
+    };
+
+    const sortData = (col, options = { toggle: true }) => {
+      if (sortCol === col) {
+        if (options.toggle) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortCol = col;
+        sortDir = 'asc';
+      }
+      filteredDataSet.sort((a, b) => {
+        const cmp = compareValues(a[sortCol], b[sortCol]);
+        return sortDir === 'asc' ? cmp : -cmp;
+      });
+    };
+
+    const updateTableAndHeader = () => {
+      clusterize.update(renderRows());
+      container.querySelectorAll('th[data-slot="table-head"]').forEach((th) => {
+        th.classList.remove('sorted-asc', 'sorted-desc');
+        if (th.dataset.col === sortCol)
+          th.classList.add(sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+      });
+    };
+
+    const filterDataSet = (query) => {
+      if (!query) filteredDataSet = [...dataSet];
+      else {
+        const q = query.trim().toLowerCase();
+        filteredDataSet = dataSet.filter((row) =>
+          cols.some((col) => String(row[col] ?? '').toLowerCase().includes(q))
+        );
+      }
+      if (sortCol) sortData(sortCol, { toggle: false });
+      updateTableAndHeader();
+      updateSearchCount();
+    };
+
+    const updateSearchCount = () => {
+      const input = container.querySelector('#customSearchInput');
+      const countSpan = container.querySelector('#searchCount');
+      if (!input || !countSpan) return;
+      const v = input.value.trim();
+      countSpan.textContent = v ? `${filteredDataSet.length} found` : '';
+    };
+
+    // Custom search bar focus
+    const showCustomSearchBar = () => {
+      const input = container.querySelector('#customSearchInput');
+      if (!input) return;
+      setTimeout(() => {
+        input.focus();
+        input.select();
+      }, 0);
+      input.value = lastSearch;
+      filterDataSet(lastSearch);
+    };
+
+    // Event listeners
+    container.querySelectorAll('th[data-slot="table-head"]').forEach((th) => {
+      th.addEventListener('click', () => {
+        sortData(th.dataset.col, { toggle: true });
+        updateTableAndHeader();
+      });
+    });
+
+    const customSearchInput = container.querySelector('#customSearchInput');
+    customSearchInput.addEventListener('input', (e) => {
+      lastSearch = e.target.value;
+      filterDataSet(e.target.value);
+    });
+    customSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        lastSearch = '';
+        e.target.value = '';
+        filterDataSet('');
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        showCustomSearchBar();
+      }
+    });
+
+    setTimeout(() => {
+      clusterize = new window.Clusterize({
+        rows: renderRows(),
+        scrollId,
+        contentId,
+      });
+      sortData(sortCol, { toggle: false });
+      updateTableAndHeader();
+    }, 0);
+
+    // Extra styles
+    const style = document.createElement('style');
+    style.textContent = `
+      .rugplay-hijack-table th.sorted-asc:after { content: " ▲"; font-size: 0.9em; vertical-align:middle; color: #7e8693;}
+      .rugplay-hijack-table th.sorted-desc:after { content: " ▼"; font-size: 0.9em; vertical-align:middle; color: #7e8693;}
+      .rugplay-hijack-table td, .rugplay-hijack-table th {background:inherit!important;}
+      .rugplay-hijack-table input.input-search {background:var(--background); color:inherit;}
+      .count {margin-left:0.5em;}
+    `;
+    container.appendChild(style);
+
+    container.classList.add('rugplay-hijack-table');
+    return container;
+  }
+
+  // --- BUTTONS ABOVE TABLE ---
+  function injectAboveTableButtons() {
+    const main = document.querySelector('div.container.mx-auto.max-w-7xl.p-6');
+    if (!main) return false;
+    if (main.querySelector('.rp-above-table-buttons-card')) return true;
+
+    const card = document.createElement('div');
+    card.className = "rp-above-table-buttons-card";
+    card.style.alignItems = 'center';
+    card.innerHTML = `
+      <button type="button"
+          class="rp-add-buttons bg-primary text-primary-foreground px-4 py-2 rounded font-medium text-sm hover:bg-primary/90 transition-colors"
+          id="rp-above-btn-send-money">
+          Send Money
+      </button><button type="button"
+          class="rp-add-buttons bg-secondary text-secondary-foreground px-4 py-2 rounded font-medium text-sm hover:bg-accent/70 ml-2 transition-colors"
+          id="rp-above-btn-view-all">
+          View All Transactions
+      </button>
+    `;
+
+    card.querySelector('#rp-above-btn-send-money').onclick = () => {
+      if (!window.fullPortfolio) {
+        alert('Portfolio data not loaded yet – try again in a moment.');
+        return;
+      }
+      createSendMoneyModal(window.fullPortfolio);
+    };
+
+    card.querySelector('#rp-above-btn-view-all').onclick = () => {
+      location.assign('/transactions');
+    };
+
+    // Insert the card above table
+    main.appendChild(card);
+    return true;
+  }
+// == PATCH: Portfolio Top Summary Cards ==
+// Add top summary cards: Total Portfolio Value, Cash Balance, Coin Holdings
+function injectPortfolioTopCards(portfolio) {
+  const main = document.querySelector('div.container.mx-auto.max-w-7xl.p-6');
+  if (!main) return false;
+  if (main.querySelector('.rp-top-summary-cards')) return true; // already injected
+
+  const totalValue = portfolio.totalValue ?? 0;
+  const baseCurrencyBalance = portfolio.baseCurrencyBalance ?? 0;
+  const totalCoinValue = portfolio.totalCoinValue ?? 0;
+  const numPositions = Array.isArray(portfolio.coinHoldings) ? portfolio.coinHoldings.length : 0;
+  const cashPct = totalValue > 0
+    ? ((baseCurrencyBalance / totalValue) * 100).toFixed(1)
+    : '100.0';
+
+  const formatMoney = (n) => {
+    if (!isFinite(n)) return '$0.00';
+    const absN = Math.abs(n);
+    if (absN >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
+    if (absN >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+    if (absN >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+    return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  // Icons SVG
+  const iconWallet = `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="8" rx="2"/><path d="M17 8V5a5 5 0 0 0-10 0v3"/><circle cx="12" cy="15" r="2"/></svg>`;
+  const iconDollar = `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`;
+  const iconTrending = `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 6 21 6 21 11"/><line x1="4" y1="20" x2="21" y2="3"/></svg>`;
+
+  // Card HTML helper
+  const cardHTML = (icon, title, value, subtitle, customClass) => `
+    <div class="rp-top-card${customClass ? ' ' + customClass : ''}">
+      <div class="rp-card-title">${icon}<span>${title}</span></div>
+      <div class="rp-card-value">${value}</div>
+      <div class="rp-card-sub">${subtitle ?? ''}</div>
+    </div>
+  `;
+
+  // Container
+  const cardsRow = document.createElement('div');
+  cardsRow.className = 'rp-top-summary-cards';
+
+  cardsRow.innerHTML += cardHTML(
+    iconWallet,
+    'Total',
+    formatMoney(totalValue),
+    '',
+    'rp-card-success'
+  );
+  cardsRow.innerHTML += cardHTML(
+    iconDollar,
+    'Cash Balance',
+    formatMoney(baseCurrencyBalance),
+    `${cashPct}% of portfolio`
+  );
+  cardsRow.innerHTML += cardHTML(
+    iconTrending,
+    'Coin Holdings',
+    formatMoney(totalCoinValue),
+    `${numPositions} positions`
+  );
+
+  // Add CSS (only once!)
+  if (!document.getElementById('rp-top-summary-cards-css')) {
+    const style = document.createElement('style');
+    style.id = 'rp-top-summary-cards-css';
+    style.textContent = `
+    .rp-top-summary-cards {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.1rem;
+      margin-bottom: 2.5rem;
+    }
+    @media (min-width: 900px) {
+      .rp-top-summary-cards {
+        grid-template-columns: repeat(3, minmax(0,1fr));
+      }
+    }
+    .rp-top-card {
+      background: var(--card, #18181b);
+      color: var(--card-foreground, #fff);
+      border: 1px solid var(--border, #28282f);
+      border-radius: 0.75rem;
+      padding: 1.2rem 1.5rem 1.4rem 1.5rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      display: flex;
+      flex-direction: column;
+      gap: 0.3em;
+      min-width: 0;
+    }
+    .rp-card-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5em;
+      font-size: 1.01em;
+      font-weight: 500;
+      margin-bottom: 0.55em;
+      color: var(--muted-foreground, #8e94a8);
+    }
+    .rp-top-card.rp-card-success .rp-card-value {
+      color: #1fbe5b;
+    }
+    .rp-card-value {
+      font-size: 2.1em;
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin-bottom: 0.23em;
+      color: var(--foreground, #fff);
+      word-break: break-all;
+    }
+    .rp-card-sub {
+      font-size: .95em;
+      color: var(--muted-foreground, #a7adc3);
+      font-weight: 400;
+      min-height: 1.3em;
+    }
+    `;
+    document.head.appendChild(style);
+  }
+  main.appendChild(cardsRow);
+  return true;
+}
+  // --- WIPE MAIN CONTAINER AND INJECT NEW CONTENT ---
+  function injectPortfolioTableDirectly() {
+    if (!window.fullPortfolio || !Array.isArray(window.fullPortfolio.coinHoldings)) return false;
+    const main = document.querySelector('div.container.mx-auto.max-w-7xl.p-6');
+    if (!main) return false;
+    // Remove all children
+    while (main.firstChild) main.removeChild(main.firstChild);
+
+    // Buttons and table
+    injectAboveTableButtons();
+    injectPortfolioTopCards(window.fullPortfolio);
+    main.appendChild(buildPortfolioTable(window.fullPortfolio.coinHoldings));
+    main.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
+  }
+
+  // --- TRY REPLACE CONTENT EVERY 500MS UP TO 8S ---
+  function keepTryingToInjectTable() {
+    let tryCount = 0;
+    const timer = setInterval(() => {
+      tryCount++;
+      if (injectPortfolioTableDirectly() || tryCount > 16) clearInterval(timer);
+    }, 500);
+  }
+
+  injectClusterize(keepTryingToInjectTable);
+
+function createSendMoneyModal(portfolio) {
+  document.getElementById('rp-sendmoney-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'rp-sendmoney-modal';
+  modal.style = `
+    position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:9999;
+  `;
+
+  const coinHoldings = portfolio.coinHoldings ?? [];
+  const userBalance = portfolio.baseCurrencyBalance ?? 0;
+  let selectedCoinSymbol = '';
+
+  // Helper: wait for Clusterize to be loaded if needed
+  function loadClusterizeIfNeeded(callback) {
+    if (window.Clusterize) return callback();
+    const script = document.createElement('script');
+    script.src = CLUSTERIZE_JS;
+    script.onload = () => callback();
+    document.head.appendChild(script);
+  }
+
+  // --- New Coin Block with fuzzy search and Clusterize.js ---
+  function getCoinItemHtml(h) {
+    return `<div class="rp-cluster-coin-item" tabindex="0" data-symbol="${h.symbol}" style="padding:5px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;">
+      <span style="flex:1;">${h.symbol}</span><span style="font-size:13px;color:#ccc;">(${h.quantity.toFixed(6)} available)</span>
+    </div>`;
+  }
+  const coinDisclaimerHtml = `
+    <div id="rp-sendmoney-coindisclaimer" style="color:#e69734;padding:3px 0 6px 0;font-size:13px;display:none;">
+      <b>Note:</b> The server currently uses an incorrect value calculation for coins.<br>
+      The value above is what the server uses, but the <b>true value</b> is shown below.
+    </div>
+  `;
+  // Modal UI with custom coin block
+  modal.innerHTML = `
+    <div style="
+      background: var(--background, #19191f);
+      color: var(--foreground, #eee);
+      min-width:350px;
+      max-width:95vw;
+      box-shadow:0 4px 32px rgba(0,0,0,.18);
+      border-radius:12px;
+      padding:32px 28px;
+      font-size:16px;
+      position:relative;">
+      <button id="rp-modal-close" style="position:absolute;top:11px;right:12px;font-size:20px;background:none;border:none;color:#888;cursor:pointer;">×</button>
+      <div style="margin-bottom:16px;font-weight:600;font-size:20px;display:flex;gap:10px;align-items:center;">
+        <svg style="height:22px;width:22px;vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M17 8V5a5 5 0 0 0-10 0v3"/><rect width="20" height="14" x="2" y="8" rx="2" /><path d="M12 12v4"/><path d="M8 16h8"/></svg>
+        Send Money / Coins
+      </div>
+      <form id="rp-sendmoney-form" autocomplete="off">
+        <div style="margin-bottom:12px;">
+          <label style="font-weight:500;">Recipient Username</label>
+          <input type="text" id="rp-sendmoney-recipient" autocomplete="off" placeholder="Enter username (without @)" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="font-weight:500;">Type</label>
+          <select id="rp-sendmoney-type" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+            <option value="CASH">Cash ($)</option>
+            <option value="COIN" ${coinHoldings.length === 0 ? 'disabled' : ''}>Coins</option>
+          </select>
+        </div>
+        <div id="rp-sendmoney-coinblock" style="margin-bottom:12px;display:none;">
+          <label style="font-weight:500;">Select Coin</label>
+          <div id="rp-coin-search-wrap" style="position:relative;">
+            <input id="rp-sendmoney-coinsearch" autocomplete="off" placeholder="Search coin symbol..." style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+            <div id="rp-sendmoney-coindrop" style="position:absolute;left:0;right:0;top:40px;z-index:20;background:#222;border-radius:7px;box-shadow:0 6px 32px rgba(0,0,0,0.16);display:none;max-height:192px;border:1px solid #2a2e38;">
+              <div id="rp-clusterize-scroll" style="max-height:192px;overflow-y:auto;">
+                <div id="rp-clusterize-content"></div>
+              </div>
             </div>
           </div>
         </div>
-        `;
+        <div style="margin-bottom:10px;">
+          <label id="rp-sendmoney-amtlabel" style="font-weight:500;">Amount ($)</label>
+          <div style="display:flex;gap:6px;">
+            <input type="number" id="rp-sendmoney-amount" min="0" autocomplete="off" step="0.01" placeholder="0.00" style="flex:1;padding:7px 8px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+            <button type="button" id="rp-sendmoney-max" style="background:#3a4157;color:#fff;font-weight:500;padding:7px 12px;border-radius:5px;border:none;cursor:pointer;">Max</button>
+          </div>
+          <div style="margin:2px 0 0 2px;font-size:13px;color:#aaa;">
+            <span id="rp-sendmoney-available"></span>
+            <span id="rp-sendmoney-coinvalue" style="margin-left:10px;"></span>
+<div id="rp-sendmoney-coindisclaimer-container">
+      ${coinDisclaimerHtml}
+      <div id="rp-sendmoney-truecoinvalue" style="color:#a6e09c;font-size:13px;display:none;margin-top:2px;"></div>
+</div>
+          </div>
+        </div>
+        <div id="rp-sendmoney-min-msg" style="color:#d97b42;font-size:13px;display:none;margin-bottom:9px;"></div>
+        <div id="rp-sendmoney-error" style="color:#d97b42;font-size:14px;display:none;margin-bottom:9px;"></div>
+        <div style="margin-top:24px;display:flex;gap:10px;">
+          <button type="button" id="rp-sendmoney-cancel" style="background:#383c4a;color:#ccc;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Cancel</button>
+          <button type="submit" id="rp-sendmoney-sendbtn" style="background:var(--primary,#3066fa);color:var(--primary-foreground,#fff);font-weight:600;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Send</button>
+        </div>
+      </form>
+    </div>
+  `;
 
-        let dataSet = [...coinHoldings];
-        let filteredDataSet = [...coinHoldings];
-        let sortCol = "value", sortDir = "desc";
-        let lastSearch = "";
-        let clusterize = null;
-        function renderRows() {
-            return filteredDataSet.map(row => {
-                const symbol = row[cols[0]];
-                const safeSymbol = String(symbol || '').replace(/</g, "&lt;").replace(/>/g, "&gt;");
-                return `<tr data-slot="table-row" class="data-[state=selected]:bg-muted border-b hover:bg-muted/50 cursor-pointer transition-colors" style="cursor:pointer"
-                    onclick="window.open('https://rugplay.com/coin/${encodeURIComponent(safeSymbol)}', '_self')">` +
-                    cols.map((col,i) =>
-                      `<td data-slot="table-cell" class="whitespace-nowrap p-2 align-middle font-medium text-xs ${isRenderableNumber(row[col]) ? "font-mono" : ""} ${colDefs[i].class}" title="${row[col] ?? ''}">` +
-                        (
-                          isRenderableNumber(row[col]) && Math.abs(Number(row[col])) >= 1000
-                            ? formatNumberSmart(row[col])
-                            : (isRenderableNumber(row[col]) ? formatNumberSmart(row[col]) : (row[col] ?? ''))
-                        ) +
-                      `</td>`
-                    ).join('') +
-                    '</tr>';
-            });
-        }
-        function compareValues(a,b) {
-            if(a==null && b==null) return 0;
-            if(a==null) return -1;
-            if(b==null) return 1;
-            let numA = parseFloat(a), numB = parseFloat(b);
-            let isNumA = !isNaN(numA) && a !== '';
-            let isNumB = !isNaN(numB) && b !== '';
-            if (isNumA && isNumB) return numA - numB;
-            return String(a).localeCompare(String(b), undefined, { sensitivity: 'base' });
-        }
-        function sortData(col, options={toggle:true}) {
-            if(sortCol === col) {
-                if(options.toggle) sortDir = sortDir==="asc"?"desc":"asc";
-            } else { sortCol = col; sortDir = "asc"; }
-            filteredDataSet.sort((a, b) => {
-                const cmp = compareValues(a[sortCol], b[sortCol]);
-                return sortDir==="asc"?cmp:-cmp;
-            });
-        }
-        function updateTableAndHeader() {
-            clusterize.update(renderRows());
-            container.querySelectorAll('th[data-slot="table-head"]').forEach(th => {
-                th.classList.remove('sorted-asc', 'sorted-desc');
-                if (th.dataset.col === sortCol) th.classList.add(sortDir === "asc" ? 'sorted-asc' : 'sorted-desc');
-            });
-        }
-        function filterDataSet(query) {
-            if (!query) filteredDataSet = [...dataSet];
-            else {
-                const q = query.trim().toLowerCase();
-                filteredDataSet = dataSet.filter(row => cols.some(col => ((row[col] ?? '') + '').toLowerCase().includes(q)));
-            }
-            if (sortCol) sortData(sortCol, {toggle: false});
-            updateTableAndHeader();
-            updateSearchCount();
-        }
-        function updateSearchCount() {
-            const input = container.querySelector('#customSearchInput');
-            const countSpan = container.querySelector('#searchCount');
-            if (!input || !countSpan) return;
-            const v = input.value.trim();
-            if (!v) countSpan.textContent = "";
-            else countSpan.textContent = filteredDataSet.length + " found";
-        }
-        function showCustomSearchBar() {
-            const input = container.querySelector('#customSearchInput');
-            if (!input) return;
-            setTimeout(() => { input.focus(); input.select(); }, 0);
-            input.value = lastSearch;
-            filterDataSet(lastSearch);
-        }
-        container.querySelectorAll('th[data-slot="table-head"]').forEach(th => {
-            th.addEventListener('click', () => {
-              sortData(th.dataset.col, {toggle:true});
-              updateTableAndHeader();
-            });
-        });
-        container.querySelector('#customSearchInput').addEventListener('input', function(e) {
-            lastSearch = e.target.value;
-            filterDataSet(e.target.value);
-        });
-        container.querySelector('#customSearchInput').addEventListener('keydown', function(e) {
-            if (e.key === "Escape") {
-                lastSearch = "";
-                this.value = "";
-                filterDataSet("");
-            }
-        });
-        document.addEventListener('keydown', function(e) {
-            if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='f') {
-                e.preventDefault();
-                showCustomSearchBar();
-            }
-        });
-        setTimeout(function(){
-            clusterize = new window.Clusterize({
-                rows: renderRows(),
-                scrollId: scrollId,
-                contentId: contentId
-            });
-            sortData(sortCol, {toggle:false});
-            updateTableAndHeader();
-        }, 0);
+  document.body.appendChild(modal);
 
-        const style = document.createElement('style');
-        style.textContent = `
-          .rugplay-hijack-table th.sorted-asc:after { content: " ▲"; font-size: 0.90em; vertical-align:middle; color: #7e8693;}
-          .rugplay-hijack-table th.sorted-desc:after { content: " ▼"; font-size: 0.90em; vertical-align:middle; color: #7e8693;}
-          .rugplay-hijack-table td, .rugplay-hijack-table th {background:inherit!important;}
-          .rugplay-hijack-table input.input-search {background:var(--background); color:inherit;}
-          .count {margin-left:0.5em;}
-        `;
-        container.appendChild(style);
+  // --- Inputs ---
+  const typeSel = modal.querySelector('#rp-sendmoney-type');
+  const coinSelBlock = modal.querySelector('#rp-sendmoney-coinblock');
+  const coinSearchInput = modal.querySelector('#rp-sendmoney-coinsearch');
+  const coinDrop = modal.querySelector('#rp-sendmoney-coindrop');
+  const amtLabel = modal.querySelector('#rp-sendmoney-amtlabel');
+  const amountInput = modal.querySelector('#rp-sendmoney-amount');
+  const maxBtn = modal.querySelector('#rp-sendmoney-max');
+  const errorDiv = modal.querySelector('#rp-sendmoney-error');
+  const minMsg = modal.querySelector('#rp-sendmoney-min-msg');
+  const availableSpan = modal.querySelector('#rp-sendmoney-available');
+  const coinValueSpan = modal.querySelector('#rp-sendmoney-coinvalue');
+  const cancelBtn = modal.querySelector('#rp-sendmoney-cancel');
+  const closeBtn = modal.querySelector('#rp-modal-close');
+    const coinDisclaimerDiv = modal.querySelector('#rp-sendmoney-coindisclaimer');
+  const trueCoinValueDiv = modal.querySelector('#rp-sendmoney-truecoinvalue');
 
-        container.classList.add('rugplay-hijack-table');
-        return container;
+  let transferType = typeSel.value;
+  let clusterizeApi = null;
+  let clusterizeCurList = [];
+  let coinSearchFocused = false;
+
+  const getCoinHolding = (symbol) => coinHoldings.find((h) => h.symbol === symbol);
+
+  // --- COIN SEARCH/SELECT CLUSTERIZE INIT ---
+  function renderCoinClusterList(filteredCoins) {
+    return filteredCoins.map(getCoinItemHtml);
+  }
+  function fuzzyMatchCoin(haystack, needle) {
+    // Simple fuzzy: all chars of needle appear in order in haystack (case-insensitive)
+    haystack = haystack.toLowerCase();
+    needle = needle.toLowerCase();
+    let hIdx = 0, nIdx = 0;
+    while (hIdx < haystack.length && nIdx < needle.length) {
+      if (haystack[hIdx] === needle[nIdx]) nIdx++;
+      hIdx++;
+    }
+    return nIdx === needle.length;
+  }
+  function filterCoinsForSearch(query) {
+    if (!query) return coinHoldings;
+    return coinHoldings.filter(
+      (h) => fuzzyMatchCoin(h.symbol, query)
+    );
+  }
+  function setupClusterizeForCoins() {
+    loadClusterizeIfNeeded(() => {
+      const rows = renderCoinClusterList(coinHoldings);
+      clusterizeApi = new Clusterize({
+        rows,
+        scrollId: 'rp-clusterize-scroll',
+        contentId: 'rp-clusterize-content',
+        no_data_text: 'No coins found'
+      });
+      clusterizeCurList = coinHoldings;
+    });
+  }
+  function updateClusterize(query) {
+    if (!window.Clusterize) return;
+    const filtered = filterCoinsForSearch(query);
+    clusterizeCurList = filtered;
+    clusterizeApi.update(renderCoinClusterList(filtered));
+    setTimeout(() => {
+      // Optionally scroll to top or focus first
+    }, 0);
+  }
+
+  // Handle coin select dropdown show/hide and select behavior
+  function showCoinDropdown() {
+    if (coinHoldings.length === 0) return;
+    coinDrop.style.display = '';
+    updateClusterize(coinSearchInput.value);
+  }
+  function hideCoinDropdown() {
+    coinDrop.style.display = 'none';
+  }
+  function completeToCoin(idx = 0) {
+    if (clusterizeCurList.length === 0) return;
+    const h = clusterizeCurList[idx];
+    selectedCoinSymbol = h.symbol;
+    coinSearchInput.value = h.symbol;
+    hideCoinDropdown();
+    updateCoinInputs();
+  }
+  // Handle click and keyboard
+  function onClusterCoinClick(e) {
+    let el = e.target;
+    while (el && !el.dataset?.symbol && el !== coinDrop) el = el.parentNode;
+    if (!el || !el.dataset.symbol) return;
+    selectedCoinSymbol = el.dataset.symbol;
+    coinSearchInput.value = selectedCoinSymbol;
+    hideCoinDropdown();
+    updateCoinInputs();
+    // Remove focus from input for clarity
+    coinSearchInput.blur();
+  }
+
+  // --- Modal logic ---
+ function updateAvailableInfo() {
+    const numericAmount = parseFloat(amountInput.value) || 0;
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+
+    availableSpan.innerHTML =
+      transferType === 'CASH'
+        ? `Available: $${userBalance.toFixed(2)}`
+        : selectedHolding
+        ? `Available: ${selectedHolding.quantity.toFixed(6)} ${selectedHolding.symbol}`
+        : 'Available: 0';
+
+    if (
+      transferType === 'COIN' &&
+      selectedHolding &&
+      numericAmount > 0
+    ) {
+      // "Wrong/server" calculation:
+      const serverEstValue = numericAmount * selectedHolding.currentPrice;
+
+      // "True" calculation: use coinValueCalcWithoutK (inputs: currentPrice, quantity)
+      const trueEstValue = coinValueCalcWithoutK(selectedHolding.currentPrice, numericAmount);
+
+      coinValueSpan.textContent = `≈ $${serverEstValue.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`;
+
+      coinDisclaimerDiv.style.display = '';
+      trueCoinValueDiv.style.display = '';
+
+      trueCoinValueDiv.innerHTML = `
+        True estimated value: ≈ $${trueEstValue.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
+      `;
+    } else {
+      coinValueSpan.textContent = '';
+      coinDisclaimerDiv.style.display = 'none';
+      trueCoinValueDiv.style.display = 'none';
+    }
+  }
+
+  function updateCoinInputs() {
+    transferType = typeSel.value;
+    if (transferType === 'COIN') {
+      coinSelBlock.style.display = coinHoldings.length > 0 ? '' : 'none';
+      amtLabel.textContent = `Amount (${selectedCoinSymbol || '...'})`;
+      amountInput.step = '0.000001';
+      amountInput.placeholder = '0.000000';
+      // focus & empty by default on switch
+      if (!coinSearchFocused) {
+        coinSearchInput.value = '';
+        showCoinDropdown();
+        setTimeout(() => coinSearchInput.focus(), 16);
+      }
+    } else {
+      coinSelBlock.style.display = 'none';
+      amtLabel.textContent = 'Amount ($)';
+      amountInput.step = '0.01';
+      amountInput.placeholder = '0.00';
+    }
+    updateAvailableInfo();
+    validateAll();
+  }
+
+  // -- Init coin search dropdown and listeners
+  setupClusterizeForCoins();
+  // Show/hide dropdown on input click
+  coinSearchInput.addEventListener('focus', () => {
+    coinSearchFocused = true;
+    showCoinDropdown();
+  });
+  coinSearchInput.addEventListener('blur', () => {
+    setTimeout(() => { coinSearchFocused = false; hideCoinDropdown(); }, 150);
+  });
+  // Fuzzy filter
+  coinSearchInput.addEventListener('input', (e) => {
+    updateClusterize(coinSearchInput.value);
+  });
+  // Key selection and Enter
+  coinSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      completeToCoin(0);
+    }
+    // Optionally add Arrow controls later
+  });
+  // Clusterize dropdown click
+  coinDrop.addEventListener('mousedown', function(e) {
+    // Use mousedown to select before blur!
+    onClusterCoinClick(e);
+  });
+
+  // On Coin mode select
+  typeSel.addEventListener('change', () => {
+    transferType = typeSel.value;
+    if (transferType === 'COIN') {
+      selectedCoinSymbol = '';
+      coinSearchInput.value = '';
+      showCoinDropdown();
+      setTimeout(() => coinSearchInput.focus(), 16);
+    } else {
+      coinSearchInput.value = '';
+      hideCoinDropdown();
+    }
+    amountInput.value = '';
+    updateCoinInputs();
+  });
+
+  amountInput.addEventListener('input', () => {
+    updateAvailableInfo();
+    validateAll();
+  });
+
+  maxBtn.addEventListener('click', () => {
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+    const maxAmount =
+      transferType === 'CASH'
+        ? userBalance
+        : selectedHolding
+        ? selectedHolding.quantity
+        : 0;
+    amountInput.value =
+      transferType === 'CASH'
+        ? Math.max(maxAmount, 10)
+        : maxAmount;
+    updateAvailableInfo();
+    validateAll();
+  });
+
+
+  const validateAll = () => {
+    errorDiv.style.display = 'none';
+    minMsg.style.display = 'none';
+    const recipient = modal.querySelector('#rp-sendmoney-recipient').value.trim();
+    const numericAmount = parseFloat(amountInput.value) || 0;
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+    const hasValidAmount = numericAmount > 0;
+    const hasValidRecipient = recipient.length > 0;
+    const hasEnoughFunds =
+      transferType === 'CASH'
+        ? numericAmount <= userBalance
+        : selectedHolding
+        ? numericAmount <= selectedHolding.quantity
+        : false;
+    const estimatedValue =
+      transferType === 'COIN' &&
+      selectedHolding &&
+      numericAmount > 0
+        ? numericAmount * selectedHolding.currentPrice
+        : 0;
+    const isWithinCashLimit =
+      transferType === 'CASH' ? numericAmount >= 10 : true;
+    const isWithinCoinValueLimit =
+      transferType === 'COIN' ? estimatedValue >= 10 : true;
+    const canSend =
+      hasValidAmount &&
+      hasValidRecipient &&
+      hasEnoughFunds &&
+      isWithinCashLimit &&
+      isWithinCoinValueLimit;
+
+    if (!hasEnoughFunds && hasValidAmount) {
+      minMsg.textContent = `Insufficient ${transferType === 'CASH' ? 'funds' : 'coins'}`;
+      minMsg.style.display = '';
+    } else if (!isWithinCashLimit && hasValidAmount) {
+      minMsg.textContent = `Cash transfers require a minimum of $10.00`;
+      minMsg.style.display = '';
+    } else if (!isWithinCoinValueLimit && hasValidAmount) {
+      minMsg.textContent = `Coin transfers require a minimum estimated value of $10.00`;
+      minMsg.style.display = '';
     }
 
-    // ---- 6. Find "No coin holdings" card & replace it ----
-    function replaceNoHoldingsDivWithTable() {
-        if (!fullPortfolio || !Array.isArray(fullPortfolio.coinHoldings) || !fullPortfolio.coinHoldings.length) return false;
-        const h3s = Array.from(document.querySelectorAll('h3'));
-        for (const h3 of h3s) {
-            if (h3.textContent && h3.textContent.trim() === 'No coin holdings') {
-                let cardDiv = h3;
-                while (cardDiv && !(cardDiv.dataset && cardDiv.dataset.slot === 'card')) {
-                    cardDiv = cardDiv.parentElement;
-                }
-                if (cardDiv) {
-                    const newTable = buildPortfolioTable(fullPortfolio.coinHoldings);
-                    cardDiv.replaceWith(newTable);
-                    return true;
-                }
-            }
-        }
-        return false;
+    modal.querySelector('#rp-sendmoney-sendbtn').disabled = !canSend;
+  };
+
+  updateCoinInputs();
+
+  // Modal close
+  cancelBtn.addEventListener('click', () => modal.remove());
+  closeBtn.addEventListener('click', () => modal.remove());
+
+  // Submission handler
+  modal.querySelector('#rp-sendmoney-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorDiv.style.display = 'none';
+    minMsg.style.display = 'none';
+
+    const recipient = modal.querySelector('#rp-sendmoney-recipient').value.trim();
+    const numericAmount = parseFloat(amountInput.value) || 0;
+    const selectedHolding = getCoinHolding(selectedCoinSymbol);
+
+    const postBody = {
+      recipientUsername: recipient,
+      type: transferType,
+      amount: numericAmount,
+      coinSymbol: transferType === 'COIN' ? selectedCoinSymbol : undefined,
+    };
+
+    // Double safety validation
+    if (!recipient || !(numericAmount > 0)) {
+      errorDiv.textContent = 'Missing recipient or amount';
+      errorDiv.style.display = '';
+      return;
+    }
+    const hasEnoughFunds =
+      transferType === 'CASH'
+        ? numericAmount <= userBalance
+        : selectedHolding
+        ? numericAmount <= selectedHolding.quantity
+        : false;
+    const estimatedValue =
+      transferType === 'COIN' && selectedHolding && numericAmount > 0
+        ? numericAmount * selectedHolding.currentPrice
+        : 0;
+    const isWithinCashLimit = transferType === 'CASH' ? numericAmount >= 10 : true;
+    const isWithinCoinValueLimit = transferType === 'COIN' ? estimatedValue >= 10 : true;
+    if (!hasEnoughFunds || !isWithinCashLimit || !isWithinCoinValueLimit) {
+      errorDiv.textContent = 'Not enough funds or minimum not met';
+      errorDiv.style.display = '';
+      validateAll();
+      return;
     }
 
-    // ---- 7. Try every 500ms up to 8s to replace card ----
-    function keepTryingToReplace() {
-        let tryCount = 0;
-        const timer = setInterval(() => {
-            tryCount++;
-            if (replaceNoHoldingsDivWithTable() || tryCount > 16) {
-                clearInterval(timer);
-            }
-        }, 500);
+    // Button loading state
+    const sendButton = modal.querySelector('#rp-sendmoney-sendbtn');
+    sendButton.disabled = true;
+    sendButton.textContent = 'Sending...';
+
+    try {
+      const resp = await fetch('/api/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(postBody),
+      });
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result.message || result.error || 'Transfer failed');
+      if (result.type === 'CASH') {
+        alert(`✔ Money sent! Sent $${result.amount.toFixed(2)} to @${result.recipient}`);
+      } else {
+        alert(
+          `✔ Coins sent! Sent ${result.amount.toFixed(6)} ${result.coinSymbol} (≈$${estimatedValue.toFixed(
+            2
+          )}) to @${result.recipient}`
+        );
+      }
+      modal.remove();
+    } catch (e) {
+      errorDiv.textContent = `Transfer failed: ${(e || {}).message || e}`;
+      errorDiv.style.display = '';
+    } finally {
+      sendButton.disabled = false;
+      sendButton.textContent = 'Send';
     }
-
-    // ---- 8. On Clusterize loaded, loop to replace ----
-    injectClusterize(keepTryingToReplace);
-
+  });
+}
 })();
