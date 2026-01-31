@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    Violentmonkey Scripts
-// @version      3.5.1
+// @version      3.5.2
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
-// @match        https://rugplay.com/portfolio*
-// @match        https://*.rugplay.com/portfolio*
+// @match        https://rugplay.com/*
+// @match        https://*.rugplay.com/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
 // @downloadURL  https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
