@@ -980,45 +980,29 @@ function createSendMoneyModal(portfolio) {
       sendButton.textContent = 'Send';
     }
   });
-}
-  // ... [rest of your script above stays the same] ...
 
-// --- SPA NAVIGATION FIX ---
+// --- SPA AND DOM-READY ACTIVATION FIX ---
 
-/**
- * Calls keepTryingToInjectTable if the URL matches a portfolio page
- */
-function checkAndInjectPortfolio() {
-  if (/^https:\/\/(?:[^\/]+\.)?rugplay\.com\/portfolio\b/.test(location.href)) {
-    keepTryingToInjectTable();
-  }
+function isPortfolioUrl() {
+  return /^https:\/\/(?:[^\/]+\.)?rugplay\.com\/portfolio\b/.test(location.href);
 }
 
-// Override pushState and replaceState to trigger on SPA navs
-(function () {
-  const origPushState = history.pushState;
-  const origReplaceState = history.replaceState;
+function activatePortfolioScriptIfReady() {
+  // Only runs if we're on the portfolio page, and container exists
+  if (isPortfolioUrl()) keepTryingToInjectTable();
+}
 
-  function fireLocationChangeEvent() {
-    window.dispatchEvent(new Event('locationchange'));
-  }
+// Fire immediately on load/nav
+activatePortfolioScriptIfReady();
 
-  history.pushState = function () {
-    origPushState.apply(this, arguments);
-    fireLocationChangeEvent();
-  };
-  history.replaceState = function () {
-    origReplaceState.apply(this, arguments);
-    fireLocationChangeEvent();
-  };
+// React to SPA navigation
+window.addEventListener('locationchange', activatePortfolioScriptIfReady);
 
-  window.addEventListener('popstate', fireLocationChangeEvent);
-})();
+// DOM mutation observer for main container
+const observer = new MutationObserver(() => {
+  // Whenever DOM mutates, check if we should activate
+  activatePortfolioScriptIfReady();
+});
+observer.observe(document.body, {childList: true, subtree: true});
 
-// Listen for custom locationchange events
-window.addEventListener('locationchange', checkAndInjectPortfolio);
-
-// Optionally, also observe DOM, or fallback to polling for robustness
-// Call on initial load as well
-checkAndInjectPortfolio();
 })();
