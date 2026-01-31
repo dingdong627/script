@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Better portfolio
-// @namespace    Violentmonkey Scripts
-// @version      3.5.2
+// @namespace    http://tampermonkey.net/
+// @version      3.5.4
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
-// @match        https://rugplay.com/*
-// @match        https://*.rugplay.com/*
+// @match        https://rugplay.com/portfolio*
+// @match        https://*.rugplay.com/portfolio*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
 // @downloadURL  https://raw.githubusercontent.com/dingdong627/script/refs/heads/main/Better-portfolio
@@ -307,29 +307,25 @@
         showCustomSearchBar();
       }
     });
-    function waitForScrollElementsAndInitClusterize() {
+
+function initClusterizeWhenReady() {
+  // Try to get the elements by ID
   const scrollEl = document.getElementById(scrollId);
   const contentEl = document.getElementById(contentId);
-  if (scrollEl && contentEl) {
-    clusterize = new window.Clusterize({
-      rows: renderRows(),
-      scrollId,
-      contentId,
-    });
-    sortData(sortCol, { toggle: false });
-    updateTableAndHeader();
-  } else {
-    // Try again once shortly later (max 20 tries)
-    if (!waitForScrollElementsAndInitClusterize.tries) waitForScrollElementsAndInitClusterize.tries = 1;
-    else waitForScrollElementsAndInitClusterize.tries++;
-    if (waitForScrollElementsAndInitClusterize.tries < 20) {
-      setTimeout(waitForScrollElementsAndInitClusterize, 50);
-    } else {
-      console.error("Failed to initialize Clusterize: scroll/content elements not found.");
-    }
+  if (!scrollEl || !contentEl) {
+    // Try again on next animation frame
+    requestAnimationFrame(initClusterizeWhenReady);
+    return;
   }
+  clusterize = new window.Clusterize({
+    rows: renderRows(),
+    scrollId,
+    contentId,
+  });
+  sortData(sortCol, { toggle: false });
+  updateTableAndHeader();
 }
-waitForScrollElementsAndInitClusterize();
+initClusterizeWhenReady();
 
     // Extra styles
     const style = document.createElement('style');
@@ -980,29 +976,5 @@ function createSendMoneyModal(portfolio) {
       sendButton.textContent = 'Send';
     }
   });
-
-// --- SPA AND DOM-READY ACTIVATION FIX ---
-
-function isPortfolioUrl() {
-  return /^https:\/\/(?:[^\/]+\.)?rugplay\.com\/portfolio\b/.test(location.href);
 }
-
-function activatePortfolioScriptIfReady() {
-  // Only runs if we're on the portfolio page, and container exists
-  if (isPortfolioUrl()) keepTryingToInjectTable();
-}
-
-// Fire immediately on load/nav
-activatePortfolioScriptIfReady();
-
-// React to SPA navigation
-window.addEventListener('locationchange', activatePortfolioScriptIfReady);
-
-// DOM mutation observer for main container
-const observer = new MutationObserver(() => {
-  // Whenever DOM mutates, check if we should activate
-  activatePortfolioScriptIfReady();
-});
-observer.observe(document.body, {childList: true, subtree: true});
-
 })();
