@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    http://tampermonkey.net/
-// @version      3.6.1
+// @version      3.7.0
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
 // @match        https://rugplay.com/*
 // @match        https://*.rugplay.com/*
@@ -21,6 +21,9 @@
     return location.hostname.endsWith("rugplay.com") &&
       location.pathname === "/portfolio";
   }
+      function onCoinPage() {
+        return /^\/coin\/[^/]+$/.test(window.location.pathname);
+    }
       // --- UTILITIES ---
     const coinValueCalcWithoutK = (price, quantity) => {
       const k = 1_000_000_000_000;
@@ -28,7 +31,12 @@
       const B = k / C;
       return B - k / (C + quantity);
     };
-
+  const coinAmountFromValue = (price, value) => {
+  const k = 1_000_000_000_000;
+  const C = Math.sqrt(k / price);
+  const B = k / C;
+  return (k / (B - value)) - C;
+};
   if (!window.__portfolioFetchOverridden) {
       window.__portfolioFetchOverridden = true;
         // --- OVERRIDE FETCH FOR PORTFOLIO API PATCH ---
@@ -539,7 +547,7 @@
 
     injectClusterize(keepTryingToInjectTable);
 
-function createSendMoneyModal(portfolio) {
+  function createSendMoneyModal(portfolio) {
   document.getElementById('rp-sendmoney-modal')?.remove();
 
   const modal = document.createElement('div');
@@ -1103,10 +1111,300 @@ function createSendMoneyModal(portfolio) {
   });
 }
 
-  } // End runPortfolioScript()
+} // End runPortfolioScript()
+
+function tradeModalModification(){
 
 
-  onUrlChange();
+	const POOL_ENDPOINT = (symbol) =>
+		`https://rugplay.com/api/coin/${encodeURIComponent(symbol)}/holders?limit=1`;
+
+	let lastModal = null;
+	let poolCache = new Map();
+	let inflight = new Map();
+  // Place after: let poolCache = new Map(); let inflight = new Map();
+let ws;
+function initPriceSocket() {
+	if (ws) return;
+	ws = new WebSocket('wss://ws.rugplay.com/');
+	ws.addEventListener('message', (event) => {
+		try {
+			const data = JSON.parse(event.data);
+			if (data?.type !== 'price_update' || !data?.coinSymbol) return;
+
+			const symbol = data.coinSymbol.toUpperCase();
+			poolCache.set(symbol, {
+				coinAmount: Number(data.poolCoinAmount) || 0,
+				baseCurrencyAmount: Number(data.poolBaseCurrencyAmount) || 0,
+				currentPrice: Number(data.currentPrice) || 0
+			});
+
+			// If the trade modal is open for this coin, re-sync inputs
+			const modal = document.querySelector('[data-slot="dialog-content"]') || document.querySelector('[role="dialog"]');
+			if (modal) {
+				const title = modal.querySelector('[data-slot="dialog-title"]') || modal.querySelector('h2');
+				const match = (title?.textContent || '').match(/(BUY|SELL)\s+([A-Z0-9]+)/i);
+				const modalSymbol = match ? match[2].toUpperCase() : null;
+				if (modalSymbol === symbol) {
+					const valueInput = modal.querySelector('[data-dual-input="value"] input');
+					if (valueInput) valueInput.dispatchEvent(new Event('input', { bubbles: true }));
+				}
+			}
+		} catch {
+			// ignore malformed messages
+		}
+	});
+
+	ws.addEventListener('close', () => {
+		ws = null;
+		// simple reconnect
+		setTimeout(initPriceSocket, 2000);
+	});
+}
+initPriceSocket();
+
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+	function sanitizeNumber(value) {
+		const n = Number(value);
+		return Number.isFinite(n) ? n : 0;
+	}
+
+	async function getPoolInfo(symbol) {
+		if (poolCache.has(symbol)) return poolCache.get(symbol);
+		if (inflight.has(symbol)) return inflight.get(symbol);
+
+		const p = fetch(POOL_ENDPOINT(symbol), { credentials: 'include' })
+			.then((res) => res.json())
+			.then((data) => {
+				const pool = data?.poolInfo || {};
+				const result = {
+					coinAmount: sanitizeNumber(pool.coinAmount),
+					baseCurrencyAmount: sanitizeNumber(pool.baseCurrencyAmount),
+					currentPrice: sanitizeNumber(pool.currentPrice)
+				};
+				poolCache.set(symbol, result);
+				inflight.delete(symbol);
+				return result;
+			})
+			.catch((err) => {
+				inflight.delete(symbol);
+				console.error('Failed to fetch pool info', err);
+				return null;
+			});
+
+		inflight.set(symbol, p);
+		return p;
+	}
+
+	function ammEstimateValueFromCoins(coins, poolCoin, poolBase) {
+		if (!coins || poolCoin <= 0 || poolBase <= 0) return 0;
+		const k = poolCoin * poolBase;
+		const newPoolCoin = poolCoin + coins;
+		const newPoolBase = k / newPoolCoin;
+		return poolBase - newPoolBase;
+	}
+
+	function ammEstimateCoinsFromValue(value, poolCoin, poolBase) {
+		if (!value || poolCoin <= 0 || poolBase <= 0) return 0;
+		const k = poolCoin * poolBase;
+		const newPoolBase = poolBase + value;
+		const newPoolCoin = k / newPoolBase;
+		return poolCoin - newPoolCoin;
+	}
+
+	function createInputRow(labelText, placeholder, step = '0.000001') {
+		const wrapper = document.createElement('div');
+		wrapper.className = 'space-y-2';
+
+		const label = document.createElement('label');
+		label.className = 'text-sm font-medium';
+		label.textContent = labelText;
+
+		const input = document.createElement('input');
+		input.type = 'number';
+		input.step = step;
+		input.min = '0';
+		input.placeholder = placeholder;
+		input.className =
+			'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm';
+
+		wrapper.appendChild(label);
+		wrapper.appendChild(input);
+
+		return { wrapper, label, input };
+	}
+
+	function renameOriginalLabel(amountInput) {
+		const label = amountInput.closest('.space-y-2')?.querySelector('label');
+		if (label) label.textContent = 'Value ($)';
+	}
+
+	function getTradeType(modal) {
+		const title = modal.querySelector('[data-slot="dialog-title"]') || modal.querySelector('h2');
+		const t = title?.textContent || '';
+		return t.toUpperCase().includes('SELL') ? 'SELL' : 'BUY';
+	}
+
+	function getCoinSymbol(modal) {
+		const title = modal.querySelector('[data-slot="dialog-title"]') || modal.querySelector('h2');
+		const text = title?.textContent || '';
+		const match = text.match(/(BUY|SELL)\s+([A-Z0-9]+)/i);
+		return match ? match[2].toUpperCase() : null;
+	}
+
+	function getAmountInput(modal) {
+		return modal.querySelector('input#amount');
+	}
+
+  function attachDualInputs(modal) {
+	const amountInput = getAmountInput(modal);
+	if (!amountInput) return;
+
+	const tradeType = getTradeType(modal);
+	const coinSymbol = getCoinSymbol(modal);
+	if (!coinSymbol) return;
+
+	const existingValue = modal.querySelector('[data-dual-input="value"]');
+	const existingCoin = modal.querySelector('[data-dual-input="coin"]');
+
+	if (existingValue || existingCoin) {
+		const amountBlock = amountInput?.closest('.space-y-2');
+		const coinLabel = `Coin Amount (${coinSymbol})`;
+
+		if (tradeType === 'SELL') {
+			if (amountBlock?.querySelector('label')) amountBlock.querySelector('label').textContent = coinLabel;
+		} else {
+			if (amountBlock?.querySelector('label')) amountBlock.querySelector('label').textContent = 'Value ($)';
+		}
+
+		const coinLabelEl = existingCoin?.querySelector('label');
+		if (coinLabelEl) coinLabelEl.textContent = coinLabel;
+
+		return;
+	}
+
+	const amountBlock = amountInput.closest('.space-y-2');
+	if (!amountBlock) return;
+
+	renameOriginalLabel(amountInput);
+
+	const coinLabel = `Coin Amount (${coinSymbol})`;
+
+	const valueRow = createInputRow('Value ($)', '0.00', '0.000001');
+	valueRow.wrapper.setAttribute('data-dual-input', 'value');
+
+	const coinRow = createInputRow(coinLabel, `0.00 ${coinSymbol}`, '0.000001');
+	coinRow.wrapper.setAttribute('data-dual-input', 'coin');
+
+	// Place according to requirement
+	if (tradeType === 'SELL') {
+		amountBlock.querySelector('label').textContent = coinLabel;
+		amountBlock.parentElement?.insertBefore(valueRow.wrapper, amountBlock);
+	} else {
+		amountBlock.parentElement?.insertBefore(coinRow.wrapper, amountBlock.nextSibling);
+	}
+
+	// Use a single value input ref that exists in the DOM
+	const valueInput = tradeType === 'BUY' ? amountInput : valueRow.input;
+
+	let isSyncing = false;
+
+	const syncFromValue = async () => {
+		if (isSyncing) return;
+		isSyncing = true;
+		try {
+			const pool = await getPoolInfo(coinSymbol);
+			if (!pool) return;
+
+			const value = sanitizeNumber(valueInput.value);
+			if (tradeType === 'BUY') {
+				const coins = ammEstimateCoinsFromValue(value, pool.coinAmount, pool.baseCurrencyAmount);
+				coinRow.input.value = coins ? coins.toFixed(6) : '';
+			} else {
+				const coins = ammEstimateCoinsFromValue(value, pool.coinAmount, pool.baseCurrencyAmount);
+				amountInput.value = coins ? coins.toFixed(6) : '';
+			}
+		} finally {
+			isSyncing = false;
+		}
+	};
+
+	const syncFromCoins = async () => {
+		if (isSyncing) return;
+		isSyncing = true;
+		try {
+			const pool = await getPoolInfo(coinSymbol);
+			if (!pool) return;
+
+			let coins = 0;
+			if (tradeType === 'BUY') {
+				coins = sanitizeNumber(coinRow.input.value);
+				const value = ammEstimateValueFromCoins(coins, pool.coinAmount, pool.baseCurrencyAmount);
+				valueInput.value = value ? value.toFixed(6) : '';
+				amountInput.value = valueInput.value;
+			} else {
+				coins = sanitizeNumber(amountInput.value);
+				const value = ammEstimateValueFromCoins(coins, pool.coinAmount, pool.baseCurrencyAmount);
+				valueInput.value = value ? value.toFixed(6) : '';
+			}
+		} finally {
+			isSyncing = false;
+		}
+	};
+
+	const maxButton =
+		amountBlock.querySelector('button') ||
+		amountBlock.parentElement?.querySelector('button');
+
+	if (maxButton && /max/i.test(maxButton.textContent || '')) {
+		maxButton.addEventListener('click', () => {
+			setTimeout(() => {
+				if (tradeType === 'BUY') {
+					valueInput.value = amountInput.value;
+					syncFromValue();
+				} else {
+					syncFromCoins();
+				}
+			}, 0);
+		});
+	}
+
+	valueInput.addEventListener('input', syncFromValue);
+	if (tradeType === 'BUY') {
+		coinRow.input.addEventListener('input', syncFromCoins);
+	} else {
+		amountInput.addEventListener('input', syncFromCoins);
+	}
+
+	if (tradeType === 'BUY') {
+		if (valueInput.value) syncFromValue();
+	} else {
+		if (amountInput.value) syncFromCoins();
+	}
+}
+
+	// Observe for dialog appearance
+	const observer = new MutationObserver(() => {
+		const modal = document.querySelector('[data-slot="dialog-content"]') || document.querySelector('[role="dialog"]');
+		if (modal && modal !== lastModal) {
+			lastModal = modal;
+			// delay to allow modal content to finish rendering
+			setTimeout(() => attachDualInputs(modal), 50);
+		}
+	});
+
+	observer.observe(document.body, { childList: true, subtree: true });
+
+	// in case modal is already open
+	setTimeout(() => {
+		const modal = document.querySelector('[data-slot="dialog-content"]') || document.querySelector('[role="dialog"]');
+		if (modal) attachDualInputs(modal);
+	}, 200);
+}
+
+
+onUrlChange();
 
 if (self.navigation) {
   navigation.addEventListener('navigatesuccess', onUrlChange);
@@ -1118,8 +1416,9 @@ if (self.navigation) {
 
 function onUrlChange() {
   if (isPortfolioPage()) {
-    console.log("on portfolio page")
     runPortfolioScript()
+  } else if (onCoinPage()){
+    tradeModalModification()
   }
 }
 
