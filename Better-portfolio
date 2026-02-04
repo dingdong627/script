@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Better portfolio
 // @namespace    http://tampermonkey.net/
-// @version      3.7.0
+// @version      3.7.1
 // @description  Replace rugplay.com portfolio list with a better one, but restores useful actions
 // @match        https://rugplay.com/*
 // @match        https://*.rugplay.com/*
@@ -205,32 +205,33 @@
       let clusterize = null;
 
       // Render table rows
-      const renderRows = () =>
-        filteredDataSet.map((row) => {
-          const symbol = row[cols[0]];
-          const safeSymbol = String(symbol || '')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-          return `<tr data-slot="table-row" class="data-[state=selected]:bg-muted border-b hover:bg-muted/50 cursor-pointer transition-colors" style="cursor:pointer"
-                    onclick="window.open('https://rugplay.com/coin/${encodeURIComponent(
-                      safeSymbol
-                    )}', '_self')">` +
-            cols
-              .map(
-                (col, i) =>
-                  `<td data-slot="table-cell" class="whitespace-nowrap p-2 align-middle font-medium text-xs ${
-                    isRenderableNumber(row[col]) ? 'font-mono' : ''
-                  } ${colDefs[i].class}" title="${row[col] ?? ''}">` +
-                  (isRenderableNumber(row[col]) && Math.abs(Number(row[col])) >= 1000
-                    ? formatNumberSmart(row[col])
-                    : isRenderableNumber(row[col])
-                    ? formatNumberSmart(row[col])
-                    : row[col] ?? '') +
-                  `</td>`
-              )
-              .join('') +
-            '</tr>';
-        });
+const renderRows = () =>
+  filteredDataSet.map((row) => {
+    const symbol = row[cols[0]];
+    const safeSymbol = String(symbol || '')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    return `<tr data-slot="table-row" class="data-[state=selected]:bg-muted border-b hover:bg-muted/50 cursor-pointer transition-colors" style="cursor:pointer"
+              onclick="window.open('https://rugplay.com/coin/${encodeURIComponent(
+                safeSymbol
+              )}', '_self')">` +
+      cols
+        .map((col, i) => {
+          const isTokenCol = col === 'symbol';
+          const cellValue = row[col] ?? '';
+          return `<td data-slot="table-cell" class="whitespace-nowrap p-2 align-middle font-medium text-xs ${
+            isRenderableNumber(row[col]) && !isTokenCol ? 'font-mono' : ''
+          } ${colDefs[i].class}" title="${cellValue}">` +
+            (!isTokenCol && isRenderableNumber(row[col]) && Math.abs(Number(row[col])) >= 1000
+              ? formatNumberSmart(row[col])
+              : !isTokenCol && isRenderableNumber(row[col])
+              ? formatNumberSmart(row[col])
+              : cellValue) +
+            `</td>`;
+        })
+        .join('') +
+      '</tr>';
+  });
 
       // Sorting
       const compareValues = (a, b) => {
