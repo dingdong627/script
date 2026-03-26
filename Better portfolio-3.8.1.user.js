@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Better portfolio
+// @name         Better portfolio v2
 // @namespace    http://tampermonkey.net/
 // @version      3.8.1
 // @description  Replace rugplay.com portfolio list with a better one, also improves trade modals
@@ -401,6 +401,7 @@ const renderRows = () =>
       const card = document.createElement('div');
       card.className = "rp-above-table-buttons-card";
       card.style.alignItems = 'center';
+      card.style.marginBottom = '1.5rem';
       card.innerHTML = `
         <button type="button"
             class="rp-add-buttons bg-primary text-primary-foreground px-4 py-2 rounded font-medium text-sm hover:bg-primary/90 transition-colors"
@@ -410,6 +411,10 @@ const renderRows = () =>
             class="rp-add-buttons bg-secondary text-secondary-foreground px-4 py-2 rounded font-medium text-sm hover:bg-accent/70 ml-2 transition-colors"
             id="rp-above-btn-view-all">
             View All Transactions
+        </button><button type="button"
+            class="rp-add-buttons bg-destructive text-destructive-foreground px-4 py-2 rounded font-medium text-sm hover:bg-destructive/90 ml-2 transition-colors"
+            id="rp-above-btn-clean">
+            Clean Portfolio
         </button>
       `;
 
@@ -423,6 +428,14 @@ const renderRows = () =>
 
       card.querySelector('#rp-above-btn-view-all').onclick = () => {
         location.assign('/transactions');
+      };
+
+      card.querySelector('#rp-above-btn-clean').onclick = () => {
+        if (!window.fullPortfolio) {
+          alert('Portfolio data not loaded yet – try again in a moment.');
+          return;
+        }
+        createCleanPortfolioModal(window.fullPortfolio);
       };
 
       // Insert the card above table
@@ -1126,7 +1139,7 @@ const renderRows = () =>
       } else {
         alert(
           `✔ Coins sent! Sent ${result.amount.toFixed(6)} ${result.coinSymbol} (≈$${(result.amount*selectedHolding.currentPrice).toFixed(
-            2
+
           )}) to @${result.recipient}`
         );
       }
@@ -1138,6 +1151,232 @@ const renderRows = () =>
       sendButton.disabled = false;
       sendButton.textContent = 'Send';
     }
+  });
+}
+
+//clean portfolio functionality
+function createCleanPortfolioModal(portfolio) {
+
+  document.getElementById('rp-clean-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'rp-clean-modal';
+  modal.style = `
+    position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:9999;
+  `;
+
+  const coinHoldings = portfolio.coinHoldings ?? [];
+  
+
+  const validHoldings = coinHoldings.filter(h => h.value !== undefined && h.value !== null && !isNaN(h.value));
+  
+
+  modal.innerHTML = `
+    <div style="
+      background: var(--background, #19191f);
+      color: var(--foreground, #eee);
+      min-width:400px;
+      max-width:95vw;
+      box-shadow:0 4px 32px rgba(0,0,0,.18);
+      border-radius:12px;
+      padding:32px 28px;
+      font-size:16px;
+      position:relative;">
+      <button id="rp-modal-close" style="position:absolute;top:11px;right:12px;font-size:20px;background:none;border:none;color:#888;cursor:pointer;">×</button>
+      <div style="margin-bottom:16px;font-weight:600;font-size:20px;display:flex;gap:10px;align-items:center;">
+        <svg style="height:22px;width:22px;vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Clean Portfolio
+      </div>
+      <form id="rp-clean-form" autocomplete="off">
+        <div style="margin-bottom:12px;">
+          <label style="font-weight:500;">Sell coins below value ($)</label>
+          <input type="number" id="rp-clean-threshold" min="0" autocomplete="off" step="0.01" placeholder="10.00" style="width:100%;padding:7px 8px;margin-top:5px;border-radius:5px;border:1px solid #383c4a;font-size:16px;background:#232334;color:#fff;">
+          <div style="margin:2px 0 0 2px;font-size:13px;color:#aaa;">
+            Coins with value below this amount will be sold
+          </div>
+        </div>
+        <div id="rp-clean-preview" style="margin:15px 0; padding:10px; background:#232334; border-radius:5px; display:none;">
+          <div style="font-weight:500; margin-bottom:8px;">Preview:</div>
+          <div id="rp-clean-coins-list" style="max-height:150px; overflow-y:auto; font-size:14px;"></div>
+          <div id="rp-clean-stats" style="margin-top:8px; font-size:13px; color:#aaa;"></div>
+        </div>
+        <div id="rp-clean-progress" style="margin:15px 0; display:none;">
+          <div style="font-weight:500; margin-bottom:8px;">Progress:</div>
+          <div style="background:#383c4a; border-radius:5px; height:20px; overflow:hidden;">
+            <div id="rp-clean-progress-bar" style="height:100%; width:0%; background:var(--primary,#3066fa); transition:width 0.3s;"></div>
+          </div>
+          <div id="rp-clean-progress-text" style="margin-top:5px; font-size:13px; text-align:center;">0%</div>
+          <div id="rp-clean-time-estimate" style="margin-top:5px; font-size:13px; text-align:center; color:#aaa;"></div>
+        </div>
+        <div id="rp-clean-results" style="margin:15px 0; padding:10px; background:#232334; border-radius:5px; display:none;">
+          <div style="font-weight:500; margin-bottom:8px;">Results:</div>
+          <div id="rp-clean-results-text" style="font-size:14px;"></div>
+        </div>
+        <div id="rp-clean-error" style="color:#d97b42;font-size:14px;display:none;margin-bottom:9px;"></div>
+        <div style="margin-top:24px;display:flex;gap:10px;">
+          <button type="button" id="rp-clean-cancel" style="background:#383c4a;color:#ccc;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Cancel</button>
+          <button type="submit" id="rp-clean-start" style="background:var(--destructive,#ff4444);color:var(--destructive-foreground,#fff);font-weight:600;padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-size:16px;">Start Cleaning</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const thresholdInput = modal.querySelector('#rp-clean-threshold');
+  const previewDiv = modal.querySelector('#rp-clean-preview');
+  const coinsListDiv = modal.querySelector('#rp-clean-coins-list');
+  const statsDiv = modal.querySelector('#rp-clean-stats');
+  const progressDiv = modal.querySelector('#rp-clean-progress');
+  const progressBar = modal.querySelector('#rp-clean-progress-bar');
+  const progressText = modal.querySelector('#rp-clean-progress-text');
+  const timeEstimateDiv = modal.querySelector('#rp-clean-time-estimate');
+  const resultsDiv = modal.querySelector('#rp-clean-results');
+  const resultsText = modal.querySelector('#rp-clean-results-text');
+  const errorDiv = modal.querySelector('#rp-clean-error');
+  const cancelBtn = modal.querySelector('#rp-clean-cancel');
+  const closeBtn = modal.querySelector('#rp-modal-close');
+  const startBtn = modal.querySelector('#rp-clean-start');
+  const form = modal.querySelector('#rp-clean-form');
+
+  thresholdInput.addEventListener('input', () => {
+    const threshold = parseFloat(thresholdInput.value) || 0;
+    if (threshold > 0) {
+      const coinsToSell = validHoldings.filter(h => h.value < threshold);
+      if (coinsToSell.length > 0) {
+        previewDiv.style.display = '';
+        coinsListDiv.innerHTML = coinsToSell
+          .slice(0, 10)
+          .map(h => `<div>${h.symbol}: $${h.value.toFixed(2)}</div>`)
+          .join('');
+        if (coinsToSell.length > 10) {
+          coinsListDiv.innerHTML += `<div style="color:#aaa; margin-top:5px;">... and ${coinsToSell.length - 10} more</div>`;
+        }
+        statsDiv.textContent = `Total: ${coinsToSell.length} coins to sell`;
+      } else {
+        previewDiv.style.display = '';
+        coinsListDiv.innerHTML = '<div style="color:#aaa;">No coins below threshold</div>';
+        statsDiv.textContent = 'Total: 0 coins to sell';
+      }
+    } else {
+      previewDiv.style.display = 'none';
+    }
+  });
+
+  let cleaningCompleted = false;
+
+  const closeModal = () => {
+    modal.remove();
+    if (cleaningCompleted) {
+      location.reload();
+    }
+  };
+  cancelBtn.addEventListener('click', closeModal);
+  closeBtn.addEventListener('click', closeModal);
+
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorDiv.style.display = 'none';
+    resultsDiv.style.display = 'none';
+    
+    const threshold = parseFloat(thresholdInput.value);
+    if (!threshold || threshold <= 0) {
+      errorDiv.textContent = 'Please enter a valid threshold value';
+      errorDiv.style.display = '';
+      return;
+    }
+    
+    const coinsToSell = validHoldings.filter(h => h.value < threshold);
+    if (coinsToSell.length === 0) {
+      errorDiv.textContent = 'No coins found below the specified threshold';
+      errorDiv.style.display = '';
+      return;
+    }
+    
+    thresholdInput.disabled = true;
+    startBtn.disabled = true;
+    startBtn.textContent = 'Cleaning...';
+    cancelBtn.disabled = true;
+    
+    previewDiv.style.display = 'none';
+    progressDiv.style.display = '';
+    
+    let successCount = 0;
+    let failCount = 0;
+    let totalValueSold = 0;
+    const totalCoins = coinsToSell.length;
+    const startTime = Date.now();
+    
+    const estimatedTime = totalCoins * 11;
+    timeEstimateDiv.textContent = `Estimated time: ${Math.ceil(estimatedTime / 60)} minutes`;
+    
+    for (let i = 0; i < coinsToSell.length; i++) {
+      const coin = coinsToSell[i];
+      
+      const progressPercent = Math.round((i / totalCoins) * 100);
+      progressBar.style.width = `${progressPercent}%`;
+      progressText.textContent = `${progressPercent}%`;
+      
+      try {
+        const truncatedQuantity = Math.floor(coin.quantity * 1e8) / 1e8;
+        
+        const response = await fetch(`/api/coin/${encodeURIComponent(coin.symbol)}/trade`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            type: 'SELL',
+            amount: truncatedQuantity
+          })
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok && result.success) {
+          successCount++;
+
+          totalValueSold += coin.value;
+        } else {
+          failCount++;
+          console.error(`Failed to sell ${coin.symbol}:`, result.message || result.error);
+        }
+      } catch (error) {
+        failCount++;
+        console.error(`Error selling ${coin.symbol}:`, error);
+      }
+      
+      const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+      const remainingCoins = totalCoins - (i + 1);
+      const estimatedRemainingSeconds = remainingCoins * 11;
+      const estimatedTotalSeconds = elapsedSeconds + estimatedRemainingSeconds;
+      timeEstimateDiv.textContent = `Elapsed: ${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s | Remaining: ~${Math.ceil(estimatedRemainingSeconds / 60)}m`;
+      
+      if (i < coinsToSell.length - 1) {
+        progressText.textContent = `${progressPercent}% - Waiting 11s...`;
+        
+        await new Promise(resolve => setTimeout(resolve, 11000));
+      }
+    }
+    
+    progressBar.style.width = '100%';
+    progressText.textContent = '100% - Complete';
+    
+
+    cleaningCompleted = true;
+    
+    progressDiv.style.display = 'none';
+    resultsDiv.style.display = '';
+    resultsText.innerHTML = `
+      <div style="color:#1fbe5b;">Successfully sold: ${successCount} coins</div>
+      <div style="color:#d97b42; margin-top:5px;">Failed to sell: ${failCount} coins</div>
+      <div style="color:#4da6ff; margin-top:5px;">Total value sold: $${totalValueSold.toFixed(2)}</div>
+      <div style="margin-top:10px; color:#aaa;">Process completed</div>
+    `;
+    
+    startBtn.style.display = 'none';
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = 'Close';
   });
 }
 
